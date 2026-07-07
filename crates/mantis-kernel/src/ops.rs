@@ -147,7 +147,9 @@ fn ear_clip(pts: &[Vec3]) -> Vec<[usize; 3]> {
 /// mesh with positive volume. Open profiles produce an uncapped wall.
 /// Zero-length `dir` or fewer than 2 profile points give an empty mesh.
 pub fn extrude(curve: &Curve, dir: Vec3, segments: usize) -> Mesh {
-    if dir.length() < EPS {
+    // `NaN < EPS` is false, so a plain magnitude test would let a non-finite
+    // direction through and seed a NaN mesh — reject it explicitly.
+    if !dir.is_finite() || dir.length() < EPS {
         return Mesh::new();
     }
     let (mut pts, closed) = profile_points(curve, segments.max(1));
@@ -201,7 +203,12 @@ pub fn revolve(
     angle: f64,
     segments: usize,
 ) -> Mesh {
-    if axis_dir.length() < EPS || angle.abs() < EPS || !angle.is_finite() {
+    if !axis_dir.is_finite()
+        || !axis_origin.is_finite()
+        || axis_dir.length() < EPS
+        || angle.abs() < EPS
+        || !angle.is_finite()
+    {
         return Mesh::new();
     }
     let (pts, profile_closed) = profile_points(profile, 32);

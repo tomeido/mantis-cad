@@ -114,6 +114,22 @@ impl GraphOp {
             GraphOp::Connect { to, .. } | GraphOp::Disconnect { to, .. } => to.0,
         }
     }
+    /// True iff every floating-point value this op carries is finite
+    /// (no NaN / ±Infinity). serde_json serializes non-finite floats as
+    /// `null`, which silently corrupts block hashes and makes the chain
+    /// impossible to reload — so the chain refuses to record a non-finite op.
+    pub fn is_finite(&self) -> bool {
+        match self {
+            GraphOp::AddNode { pos, .. } | GraphOp::MoveNode { pos, .. } => {
+                pos.0.is_finite() && pos.1.is_finite()
+            }
+            GraphOp::SetParam { value, .. } => value.is_finite(),
+            GraphOp::RemoveNode { .. }
+            | GraphOp::Connect { .. }
+            | GraphOp::Disconnect { .. } => true,
+        }
+    }
+
     /// Short human description for the chain panel.
     pub fn describe(&self) -> String {
         match self {

@@ -52,14 +52,28 @@ pub(crate) fn boolean(inputs: &[Value], i: usize, name: &str) -> Result<bool, St
 
 pub(crate) fn vector(inputs: &[Value], i: usize, name: &str) -> Result<Vec3, String> {
     let v = any(inputs, i, name)?;
-    v.as_vector()
-        .ok_or_else(|| format!("input {name}: expected Vector, got {}", v.describe()))
+    let vec = v
+        .as_vector()
+        .ok_or_else(|| format!("input {name}: expected Vector, got {}", v.describe()))?;
+    if vec.is_finite() {
+        Ok(vec)
+    } else {
+        // A computed non-finite vector (e.g. an f64 overflow to ±inf upstream)
+        // would seed NaN geometry; fail the node cleanly instead.
+        Err(format!("input {name}: not a finite vector"))
+    }
 }
 
 pub(crate) fn plane(inputs: &[Value], i: usize, name: &str) -> Result<Plane, String> {
     let v = any(inputs, i, name)?;
-    v.as_plane()
-        .ok_or_else(|| format!("input {name}: expected Plane, got {}", v.describe()))
+    let pl = v
+        .as_plane()
+        .ok_or_else(|| format!("input {name}: expected Plane, got {}", v.describe()))?;
+    if pl.origin.is_finite() && pl.x_axis.is_finite() && pl.y_axis.is_finite() {
+        Ok(pl)
+    } else {
+        Err(format!("input {name}: not a finite plane"))
+    }
 }
 
 pub(crate) fn curve(inputs: &[Value], i: usize, name: &str) -> Result<Arc<Curve>, String> {
@@ -88,9 +102,14 @@ pub(crate) fn vectors(inputs: &[Value], i: usize, name: &str) -> Result<Vec<Vec3
         .iter()
         .enumerate()
         .map(|(k, v)| {
-            v.as_vector().ok_or_else(|| {
+            let vec = v.as_vector().ok_or_else(|| {
                 format!("input {name}[{k}]: expected Vector, got {}", v.describe())
-            })
+            })?;
+            if vec.is_finite() {
+                Ok(vec)
+            } else {
+                Err(format!("input {name}[{k}]: not a finite vector"))
+            }
         })
         .collect()
 }

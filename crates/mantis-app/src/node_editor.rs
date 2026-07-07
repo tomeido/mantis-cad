@@ -63,12 +63,15 @@ pub fn category_color(category: &str) -> egui::Color32 {
 }
 
 /// Can an output of kind `from` plug into an input of kind `to`?
-/// (`Plane` inputs also accept points, mirroring `Value::as_plane`.)
+/// Mirrors the engine's implicit coercions (`Value::kind_matches` /
+/// `as_plane` / `as_bool`): a point plugs into a `Plane` port, a number into
+/// a `Bool` port.
 pub fn kinds_compatible(from: ValueKind, to: ValueKind) -> bool {
     from == ValueKind::Any
         || to == ValueKind::Any
         || from == to
         || (to == ValueKind::Plane && from == ValueKind::Vector)
+        || (to == ValueKind::Bool && from == ValueKind::Number)
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +981,7 @@ mod tests {
         assert!(kinds_compatible(ValueKind::Number, ValueKind::Any));
         assert!(kinds_compatible(ValueKind::Any, ValueKind::Mesh));
         assert!(kinds_compatible(ValueKind::Vector, ValueKind::Plane));
+        assert!(kinds_compatible(ValueKind::Number, ValueKind::Bool));
         assert!(!kinds_compatible(ValueKind::Plane, ValueKind::Vector));
         assert!(!kinds_compatible(ValueKind::Number, ValueKind::Curve));
         assert!(!kinds_compatible(ValueKind::Bool, ValueKind::Text));

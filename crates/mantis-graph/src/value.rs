@@ -42,6 +42,13 @@ impl Value {
             (Value::Plane(_), ValueKind::Plane) => true,
             (Value::Curve(_), ValueKind::Curve) => true,
             (Value::Mesh(_), ValueKind::Mesh) => true,
+            // Grasshopper-style implicit coercions the `as_*` helpers implement:
+            // a point stands in for a world-XY plane at that origin, and a
+            // number stands in for a bool (0 = false). Kept in lockstep with
+            // `as_plane` / `as_bool` so a wired input is accepted wherever the
+            // component can consume it.
+            (Value::Vector(_), ValueKind::Plane) => true,
+            (Value::Number(_), ValueKind::Bool) => true,
             (Value::Null, _) => false,
             (Value::List(_), _) => false, // engine unwraps lists before checking
             _ => false,
@@ -129,6 +136,15 @@ impl ParamValue {
         match self {
             ParamValue::Text(t) => Some(t),
             _ => None,
+        }
+    }
+    /// False if this is a non-finite `Number` (NaN / ±Infinity). Such values
+    /// cannot survive JSON serialization (serde_json emits `null`), so anything
+    /// that gets recorded on-chain must reject them first.
+    pub fn is_finite(&self) -> bool {
+        match self {
+            ParamValue::Number(n) => n.is_finite(),
+            _ => true,
         }
     }
 }

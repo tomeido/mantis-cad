@@ -212,6 +212,11 @@ pub enum ChainError {
     Diverged { at_index: u64 },
     EmptyOps,
     BadKey,
+    /// An op carries a non-finite float (NaN / ±Infinity). serde_json cannot
+    /// represent those (it emits `null`), so they would corrupt the block hash
+    /// and make the chain un-reloadable. `block` is the block position (0 for a
+    /// not-yet-sealed `append`), `op` the offending op index.
+    NonFinite { block: usize, op: usize },
     Json(String),
 }
 
@@ -245,6 +250,19 @@ fn verify_sig(block: &Block, at: usize) -> Result<(), ChainError> {
         .map_err(|_| ChainError::BadSignature { at })
 }
 
+/// Rejects a block whose ops carry any non-finite float. Must run BEFORE the
+/// hash/signature are trusted, since serde_json turns NaN/±Inf into `null`:
+/// the hash would then commit to `null` (colliding NaN, +Inf and -Inf into one
+/// hash) and the block could never be reloaded from JSON.
+fn verify_finite_ops(block: &Block, at: usize) -> Result<(), ChainError> {
+    for (oi, op) in block.ops.iter().enumerate() {
+        if !op.is_finite() {
+            return Err(ChainError::NonFinite { block: at, op: oi });
+        }
+    }
+    Ok(())
+}
+
 /// Structural verification of a non-genesis block against its predecessor:
 /// sequential index, prev_hash link, hash recomputes, signature verifies.
 fn verify_linked_block(block: &Block, prev: &Block, at: usize) -> Result<(), ChainError> {
@@ -254,6 +272,9 @@ fn verify_linked_block(block: &Block, prev: &Block, at: usize) -> Result<(), Cha
     if block.prev_hash != prev.hash {
         return Err(ChainError::BadPrevHash { at });
     }
+    // Reject non-finite ops before trusting the hash: a `null`-serialized float
+    // hashes consistently, so BadHash would NOT catch it.
+    verify_finite_ops(block, at)?;
     if block.hash != block.compute_hash() {
         return Err(ChainError::BadHash { at });
     }
@@ -298,6 +319,11 @@ impl Chain {
     ) -> Result<&Block, ChainError> {
         if ops.is_empty() {
             return Err(ChainError::EmptyOps);
+        }
+        for (oi, op) in ops.iter().enumerate() {
+            if !op.is_finite() {
+                return Err(ChainError::NonFinite { block: 0, op: oi });
+            }
         }
         let head = self.head();
         let mut block = Block {
@@ -401,6 +427,7 @@ impl Chain {
                 });
             }
             let at = block.index as usize;
+            verify_finite_ops(block, at)?;
             if block.hash != block.compute_hash() {
                 return Err(ChainError::BadHash { at });
             }
