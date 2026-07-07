@@ -1,4 +1,4 @@
 /target
-/dist
+dist/
 *.identity.json
 .trunk/
