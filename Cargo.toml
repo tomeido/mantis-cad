@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mantis-kernel",
+    "crates/mantis-graph",
+    "crates/mantis-chain",
+    "crates/mantis-app",
+    "crates/mantis-server",
+    "crates/mantis-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+mantis-kernel = { path = "crates/mantis-kernel" }
+mantis-graph = { path = "crates/mantis-graph" }
+mantis-chain = { path = "crates/mantis-chain" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+getrandom = "0.2"
+
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.31"
+egui_glow = "0.31"
+glow = "0.16"
+ehttp = "0.5"
+tiny_http = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+# fast-ish debug geometry
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,25 @@
+[package]
+name = "mantis-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mantis-kernel = { workspace = true }
+mantis-graph = { workspace = true }
+mantis-chain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_glow = { workspace = true }
+glow = { workspace = true }
+ehttp = { workspace = true }
+getrandom = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+log = "0.4"

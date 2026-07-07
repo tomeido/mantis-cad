@@ -1,0 +1,12 @@
+[package]
+name = "mantis-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mantis-kernel = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
