@@ -61,19 +61,24 @@ impl OpRecorder {
     }
 }
 
-// Node ids (fixed for a deterministic demo document).
-const RADIUS: u128 = 1;
-const LEVELS: u128 = 2;
-const SERIES: u128 = 3;
-const CENTER: u128 = 4;
-const PLANE: u128 = 5;
-const CIRCLE: u128 = 6;
-const TWIST: u128 = 7;
-const ANGLES: u128 = 8;
-const LIFTS: u128 = 9;
-const MOVE: u128 = 10;
-const ROTATE: u128 = 11;
-const LOFT: u128 = 12;
+// Node ids (fixed for a deterministic demo document). The sequence number is
+// placed in the TOP 32 bits so `NodeId`'s short display (first 8 hex chars)
+// is distinct per node in `replay` output.
+const fn demo_id(n: u128) -> u128 {
+    n << 96
+}
+const RADIUS: u128 = demo_id(1);
+const LEVELS: u128 = demo_id(2);
+const SERIES: u128 = demo_id(3);
+const CENTER: u128 = demo_id(4);
+const PLANE: u128 = demo_id(5);
+const CIRCLE: u128 = demo_id(6);
+const TWIST: u128 = demo_id(7);
+const ANGLES: u128 = demo_id(8);
+const LIFTS: u128 = demo_id(9);
+const MOVE: u128 = demo_id(10);
+const ROTATE: u128 = demo_id(11);
+const LOFT: u128 = demo_id(12);
 
 /// Build the demo chain: genesis + alice's "tower profile" + bob's
 /// "loft the tower". Pure — identities and timestamps are passed in.

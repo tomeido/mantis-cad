@@ -636,7 +636,6 @@ mod tests {
     // ---- pipelines through mantis-kernel geometry ----
 
     #[test]
-    #[ignore = "pending kernel: Curve::divide/length still todo!() while mantis-kernel is implemented concurrently"]
     fn kernel_line_divide_and_length() {
         let mut g = Graph::new();
         add_node(&mut g, 1, "point_xyz"); // (0,0,0)
@@ -664,7 +663,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending kernel: ops::extrude/Mesh::volume still todo!() while mantis-kernel is implemented concurrently"]
     fn kernel_circle_extrude_volume() {
         let mut g = Graph::new();
         add_node(&mut g, 1, "circle"); // defaults: world XY, r=1
@@ -680,7 +678,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending kernel: Mesh::sphere/volume still todo!() while mantis-kernel is implemented concurrently"]
     fn kernel_sphere_volume() {
         let mut g = Graph::new();
         add_node(&mut g, 1, "sphere"); // defaults r=1, segs 24

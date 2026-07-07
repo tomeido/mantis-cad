@@ -5,7 +5,6 @@
 //! converted to f32 column-major arrays right before upload.
 
 use crate::state::Document;
-use crate::util::format_bytes;
 use mantis_graph::{EvalOutput, Graph, NodeId, Value};
 use mantis_kernel::{BBox, Curve, Mat4, Mesh, Vec3};
 use std::collections::BTreeSet;
@@ -130,10 +129,10 @@ impl Camera {
         }
     }
 
-    /// Camera up vector (world space).
+    /// Camera up vector (world space): right × forward.
     pub fn up(&self) -> Vec3 {
         let f = (self.target - self.eye()).normalized();
-        self.right().cross(f).normalized() * -1.0 * -1.0 // right × forward, already unit
+        self.right().cross(f).normalized()
     }
 
     pub fn orbit(&mut self, dx: f64, dy: f64) {
@@ -310,7 +309,7 @@ impl CpuBatch {
 }
 
 /// Statistics gathered while building the scene batches.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct SceneStats {
     pub triangles: usize,
     pub vertices: usize,
@@ -318,13 +317,11 @@ pub struct SceneStats {
     pub bbox: BBox,
 }
 
-impl Default for BBoxDefault {
+impl Default for SceneStats {
     fn default() -> Self {
-        BBoxDefault
+        SceneStats { triangles: 0, vertices: 0, geometry_bytes: 0, bbox: BBox::EMPTY }
     }
 }
-/// (helper marker so SceneStats can derive Default even though BBox doesn't)
-pub struct BBoxDefault;
 
 /// Turn scene items into GPU-ready batches; selected nodes' geometry gets the
 /// highlight color.
@@ -675,12 +672,7 @@ impl ViewportPanel {
         ViewportPanel {
             camera: Camera::default(),
             shared: ViewportShared::new(),
-            stats: SceneStats {
-                triangles: 0,
-                vertices: 0,
-                geometry_bytes: 0,
-                bbox: BBox::EMPTY,
-            },
+            stats: SceneStats::default(),
         }
     }
 

@@ -141,6 +141,9 @@ impl Document {
         std::mem::take(&mut self.scene_dirty)
     }
 
+    /// Force a viewport rebuild (kept for callers that change display state
+    /// outside `apply_op`, e.g. future display options).
+    #[allow(dead_code)]
     pub fn mark_scene_dirty(&mut self) {
         self.scene_dirty = true;
     }
