@@ -547,7 +547,17 @@ impl NodeEditor {
     ) {
         let wr = l.widget_rect;
         let font = egui::FontId::proportional((11.0 * self.zoom).clamp(8.0, 16.0));
-        ui.push_id(("widget", l.id.0), |ui| match l.widget.clone() {
+        // Scope per node: the scope restores the parent's auto-id counter, so
+        // how many widgets an arm creates cannot shift the auto-derived ids of
+        // later nodes' widgets (breaking their in-flight drags/focus). The
+        // explicit max_rect pins the scope's min_rect inside the canvas — with
+        // the default max_rect an empty scope reports its min_rect at the
+        // parent cursor below the canvas, growing the resizable panel each
+        // repaint.
+        let scope = egui::UiBuilder::new()
+            .id_salt(("widget", l.id.0))
+            .max_rect(painter.clip_rect());
+        ui.scope_builder(scope, |ui| match l.widget.clone() {
             BodyWidget::None => {}
             BodyWidget::Slider { mut value, mut min, mut max, step } => {
                 if !editable {
@@ -567,7 +577,7 @@ impl NodeEditor {
                 if step > 0.0 && step.is_finite() {
                     slider = slider.step_by(step);
                 }
-                let sr = ui.put(s_rect, slider);
+                let sr = put_at(ui, (l.id.0, "value"), s_rect, slider);
                 if sr.changed() {
                     doc.param_drag(l.id, "value", ParamValue::Number(value));
                 }
@@ -585,14 +595,24 @@ impl NodeEditor {
                     egui::pos2(m_rect.min.x + half + 2.0, m_rect.min.y),
                     egui::vec2(half - 2.0, m_rect.height()),
                 );
-                let mr = ui.put(mn_rect, egui::DragValue::new(&mut min).speed(0.1).prefix("min "));
+                let mr = put_at(
+                    ui,
+                    (l.id.0, "min"),
+                    mn_rect,
+                    egui::DragValue::new(&mut min).speed(0.1).prefix("min "),
+                );
                 if mr.changed() {
                     doc.param_drag(l.id, "min", ParamValue::Number(min));
                 }
                 if mr.drag_stopped() || mr.lost_focus() {
                     doc.end_param_drag();
                 }
-                let xr = ui.put(mx_rect, egui::DragValue::new(&mut max).speed(0.1).prefix("max "));
+                let xr = put_at(
+                    ui,
+                    (l.id.0, "max"),
+                    mx_rect,
+                    egui::DragValue::new(&mut max).speed(0.1).prefix("max "),
+                );
                 if xr.changed() {
                     doc.param_drag(l.id, "max", ParamValue::Number(max));
                 }
@@ -612,7 +632,7 @@ impl NodeEditor {
                     return;
                 }
                 let label = if value { "true" } else { "false" };
-                let cr = ui.put(wr, egui::Checkbox::new(&mut value, label));
+                let cr = put_at(ui, (l.id.0, "toggle"), wr, egui::Checkbox::new(&mut value, label));
                 if cr.changed() {
                     if let Err(e) = doc.set_param(l.id, "value", ParamValue::Bool(value)) {
                         errors.push(e);
@@ -634,7 +654,8 @@ impl NodeEditor {
                     }
                     None => {
                         if editable {
-                            let tr = ui.put(wr, egui::TextEdit::singleline(&mut text));
+                            let tr =
+                                put_at(ui, (l.id.0, "text"), wr, egui::TextEdit::singleline(&mut text));
                             if tr.changed() {
                                 doc.param_drag(l.id, "text", ParamValue::Text(text));
                             }
@@ -822,6 +843,29 @@ impl NodeEditor {
 // helpers
 // ---------------------------------------------------------------------------
 
+/// Place a widget at an exact screen rect *without* allocating space in the
+/// parent `Ui` (unlike `Ui::put`).
+///
+/// Node-body widgets sit at pan/zoom-dependent canvas positions, so their
+/// rects can stick out of the panel. `Ui::put` grows the parent's `min_rect`
+/// to include the widget, and a resizable panel stores its content `min_rect`
+/// as next frame's size — a node outside the canvas would then inflate the
+/// node-editor panel on every repaint, squeezing the 3D viewport away.
+fn put_at(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    rect: egui::Rect,
+    widget: impl egui::Widget,
+) -> egui::Response {
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(rect)
+            .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)),
+    );
+    child.add(widget)
+}
+
 /// Cubic bezier with horizontal tangents between two port positions.
 fn draw_wire(painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2, color: egui::Color32, width: f32) {
     let dx = ((b.x - a.x).abs() * 0.5).max(30.0);
@@ -985,6 +1029,87 @@ mod tests {
         assert!(!kinds_compatible(ValueKind::Plane, ValueKind::Vector));
         assert!(!kinds_compatible(ValueKind::Number, ValueKind::Curve));
         assert!(!kinds_compatible(ValueKind::Bool, ValueKind::Text));
+    }
+
+    /// Regression test: node-body widgets whose rect lies outside the canvas
+    /// (node dragged/panned past the panel edge) must not grow the resizable
+    /// bottom panel. Before the `put_at` fix, `ui.put` expanded the panel's
+    /// `min_rect`, which egui stores as next frame's panel height — the node
+    /// editor would inflate on every repaint and squeeze the 3D viewport away.
+    #[test]
+    fn panel_height_stable_with_offscreen_node_widgets() {
+        use crate::state::Document;
+        use mantis_chain::Identity;
+
+        let ctx = egui::Context::default();
+        let mut editor = NodeEditor::new();
+        let mut doc = Document::new(Identity::generate("t"));
+        // Slider far above the canvas top and a toggle far below the bottom:
+        // both body widgets land outside the panel rect.
+        doc.apply_op(GraphOp::AddNode {
+            id: NodeId(1),
+            type_name: "number_slider".into(),
+            pos: (100.0, -400.0),
+        })
+        .unwrap();
+        doc.apply_op(GraphOp::AddNode {
+            id: NodeId(2),
+            type_name: "bool_toggle".into(),
+            pos: (100.0, 4000.0),
+        })
+        .unwrap();
+        // A wired panel node ON the canvas: its widget arm draws no widget at
+        // all (display-only), which exercises the empty-scope path — that
+        // alone used to leak a few pixels of panel height per repaint.
+        doc.apply_op(GraphOp::AddNode {
+            id: NodeId(3),
+            type_name: "panel".into(),
+            pos: (300.0, 60.0),
+        })
+        .unwrap();
+        doc.apply_op(GraphOp::Connect { from: (NodeId(1), 0), to: (NodeId(3), 0) }).unwrap();
+        doc.evaluate();
+
+        let mut heights: Vec<f32> = Vec::new();
+        for i in 0..8 {
+            let mut input = egui::RawInput::default();
+            input.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            ));
+            // Wiggle the pointer: each move is a repaint, which is what made
+            // the panel visibly creep in the app.
+            input
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(200.0 + i as f32 * 7.0, 700.0)));
+            let mut height = 0.0f32;
+            let _ = ctx.run(input, |ctx| {
+                // Same panel setup as MantisApp::update.
+                let panel = egui::TopBottomPanel::bottom("mantis_node_editor")
+                    .resizable(true)
+                    .default_height(320.0)
+                    .min_height(120.0)
+                    .frame(egui::Frame::default())
+                    .show(ctx, |ui| {
+                        let mut errors = Vec::new();
+                        editor.ui(ui, &mut doc, &mut errors);
+                    });
+                egui::CentralPanel::default().show(ctx, |_| {});
+                // This rect is what egui stores as next frame's panel height.
+                height = panel.response.rect.height();
+            });
+            heights.push(height);
+        }
+        // The stored rect must stay at the configured 320 on every frame: the
+        // pre-fix bug inflated it to include the off-canvas widget rects
+        // (immediately for the far-away toggle, creeping for the slider).
+        for (i, h) in heights.iter().enumerate() {
+            assert!(
+                (*h - 320.0).abs() < 0.75,
+                "frame {i}: panel height {h} instead of 320 — off-canvas node \
+                 widgets inflated the panel: {heights:?}"
+            );
+        }
     }
 
     #[test]
