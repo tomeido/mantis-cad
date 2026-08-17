@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.22"
+getrandom = { workspace = true }
 mantis-graph = { workspace = true }
 mantis-chain = { workspace = true }
 mantis-protocol = { workspace = true }
