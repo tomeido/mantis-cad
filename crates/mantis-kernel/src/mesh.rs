@@ -55,14 +55,29 @@ impl Mesh {
             .collect();
     }
 
-    /// Transform positions as points and normals as directions
-    /// (renormalized afterwards).
+    /// Transform positions as points and normals by the inverse-transpose.
+    /// Orientation-reversing transforms (mirror/negative scale) also reverse
+    /// triangle winding so closed outward meshes keep positive signed volume.
+    /// Singular transforms fall back to normals recomputed from the resulting
+    /// triangles.
     pub fn transform(&mut self, m: &Mat4) {
+        let det = m.linear_determinant();
         for p in &mut self.positions {
             *p = m.transform_point(*p);
         }
+        if det.is_finite() && det < 0.0 {
+            for tri in &mut self.indices {
+                tri.swap(1, 2);
+            }
+        }
+
+        let mut recompute = !det.is_finite();
         for nrm in &mut self.normals {
-            *nrm = m.transform_vector(*nrm).normalized();
+            *nrm = m.transform_normal(*nrm);
+            recompute |= *nrm == Vec3::ZERO;
+        }
+        if self.normals.len() != self.positions.len() || recompute {
+            self.recompute_normals();
         }
     }
 
@@ -87,8 +102,12 @@ impl Mesh {
         if self.normals.len() != self.positions.len() {
             self.normals.resize(self.positions.len(), Vec3::ZERO);
         }
-        self.indices
-            .extend(other.indices.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+        self.indices.extend(
+            other
+                .indices
+                .iter()
+                .map(|t| [t[0] + base, t[1] + base, t[2] + base]),
+        );
     }
 
     pub fn bbox(&self) -> BBox {
@@ -178,17 +197,32 @@ impl Mesh {
         let mut m = Mesh::new();
         let c = |u: f64, v: f64, w: f64| plane.point_at_3(u, v, w);
         // bottom (outward -normal)
-        m.push_quad(c(0.0, 0.0, 0.0), c(0.0, y, 0.0), c(x, y, 0.0), c(x, 0.0, 0.0));
+        m.push_quad(
+            c(0.0, 0.0, 0.0),
+            c(0.0, y, 0.0),
+            c(x, y, 0.0),
+            c(x, 0.0, 0.0),
+        );
         // top (outward +normal)
         m.push_quad(c(0.0, 0.0, z), c(x, 0.0, z), c(x, y, z), c(0.0, y, z));
         // v = 0 (outward -y)
-        m.push_quad(c(0.0, 0.0, 0.0), c(x, 0.0, 0.0), c(x, 0.0, z), c(0.0, 0.0, z));
+        m.push_quad(
+            c(0.0, 0.0, 0.0),
+            c(x, 0.0, 0.0),
+            c(x, 0.0, z),
+            c(0.0, 0.0, z),
+        );
         // u = x (outward +x)
         m.push_quad(c(x, 0.0, 0.0), c(x, y, 0.0), c(x, y, z), c(x, 0.0, z));
         // v = y (outward +y)
         m.push_quad(c(x, y, 0.0), c(0.0, y, 0.0), c(0.0, y, z), c(x, y, z));
         // u = 0 (outward -x)
-        m.push_quad(c(0.0, y, 0.0), c(0.0, 0.0, 0.0), c(0.0, 0.0, z), c(0.0, y, z));
+        m.push_quad(
+            c(0.0, y, 0.0),
+            c(0.0, 0.0, 0.0),
+            c(0.0, 0.0, z),
+            c(0.0, y, z),
+        );
         m.recompute_normals();
         m
     }
@@ -202,15 +236,14 @@ impl Mesh {
         let north = center + Vec3::Z * radius;
         let south = center - Vec3::Z * radius;
         m.positions.push(north); // index 0
-        // Interior rings: v = 1..vs-1, ring r has us vertices.
+                                 // Interior rings: v = 1..vs-1, ring r has us vertices.
         for r in 1..vs {
             let phi = std::f64::consts::PI * r as f64 / vs as f64;
             let (sp, cp) = phi.sin_cos();
             for u in 0..us {
                 let th = std::f64::consts::TAU * u as f64 / us as f64;
-                m.positions.push(
-                    center + Vec3::new(sp * th.cos(), sp * th.sin(), cp) * radius,
-                );
+                m.positions
+                    .push(center + Vec3::new(sp * th.cos(), sp * th.sin(), cp) * radius);
             }
         }
         let south_i = m.positions.len() as u32;
@@ -315,7 +348,8 @@ impl Mesh {
         m.positions.push(plane.point_at_3(0.0, 0.0, 0.0));
         for u in 0..n as u32 {
             let un = (u + 1) % n as u32;
-            m.indices.push([base_center, base_start + un, base_start + u]);
+            m.indices
+                .push([base_center, base_start + un, base_start + u]);
         }
         m.recompute_normals();
         m
@@ -333,7 +367,8 @@ impl Mesh {
             for v in 0..vs {
                 let ph = std::f64::consts::TAU * v as f64 / vs as f64;
                 let r = major + minor * ph.cos();
-                m.positions.push(plane.point_at_3(r * th.cos(), r * th.sin(), minor * ph.sin()));
+                m.positions
+                    .push(plane.point_at_3(r * th.cos(), r * th.sin(), minor * ph.sin()));
             }
         }
         let at = |u: usize, v: usize| -> u32 { ((u % us) * vs + v % vs) as u32 };
@@ -394,8 +429,16 @@ mod tests {
         let m = Mesh::sphere(Vec3::new(1.0, 2.0, 3.0), 1.5, 48, 24);
         let exact_v = 4.0 / 3.0 * PI * 1.5f64.powi(3);
         let exact_a = 4.0 * PI * 1.5f64 * 1.5;
-        assert!((m.volume() - exact_v).abs() / exact_v < 0.02, "vol {}", m.volume());
-        assert!((m.area() - exact_a).abs() / exact_a < 0.02, "area {}", m.area());
+        assert!(
+            (m.volume() - exact_v).abs() / exact_v < 0.02,
+            "vol {}",
+            m.volume()
+        );
+        assert!(
+            (m.area() - exact_a).abs() / exact_a < 0.02,
+            "area {}",
+            m.area()
+        );
         assert_closed_outward(&m);
         // Center offset respected.
         assert!(m.bbox().center().distance(Vec3::new(1.0, 2.0, 3.0)) < 1e-9);
@@ -411,7 +454,11 @@ mod tests {
     fn cylinder_volume() {
         let m = Mesh::cylinder(&Plane::world_xy(), 1.0, 3.0, 64);
         let exact = PI * 3.0;
-        assert!((m.volume() - exact).abs() / exact < 0.01, "vol {}", m.volume());
+        assert!(
+            (m.volume() - exact).abs() / exact < 0.01,
+            "vol {}",
+            m.volume()
+        );
         let exact_a = 2.0 * PI * 3.0 + 2.0 * PI;
         assert!((m.area() - exact_a).abs() / exact_a < 0.01);
         assert_closed_outward(&m);
@@ -421,7 +468,11 @@ mod tests {
     fn cone_volume() {
         let m = Mesh::cone(&Plane::world_xy(), 1.0, 3.0, 64);
         let exact = PI * 3.0 / 3.0;
-        assert!((m.volume() - exact).abs() / exact < 0.01, "vol {}", m.volume());
+        assert!(
+            (m.volume() - exact).abs() / exact < 0.01,
+            "vol {}",
+            m.volume()
+        );
         assert_closed_outward(&m);
     }
 
@@ -429,7 +480,11 @@ mod tests {
     fn torus_volume() {
         let m = Mesh::torus(&Plane::world_xy(), 3.0, 1.0, 64, 32);
         let exact = 2.0 * PI * PI * 3.0; // 2 π² R r²
-        assert!((m.volume() - exact).abs() / exact < 0.02, "vol {}", m.volume());
+        assert!(
+            (m.volume() - exact).abs() / exact < 0.02,
+            "vol {}",
+            m.volume()
+        );
         let exact_a = 4.0 * PI * PI * 3.0;
         assert!((m.area() - exact_a).abs() / exact_a < 0.02);
         assert_closed_outward(&m);
@@ -451,6 +506,42 @@ mod tests {
         let m = Mesh::box_mesh(&Plane::world_xy(), 1.0, 1.0, 1.0);
         let t = m.transformed(&Mat4::scaling_uniform(Vec3::ZERO, 2.0));
         assert!((t.volume() - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn transform_nonuniform_scale_uses_inverse_transpose_normals() {
+        let mut m = Mesh {
+            positions: vec![Vec3::ZERO, Vec3::X, Vec3::new(0.0, 1.0, 1.0)],
+            normals: vec![],
+            indices: vec![[0, 1, 2]],
+        };
+        m.recompute_normals();
+        let t = m.transformed(&Mat4::scaling(Vec3::new(2.0, 3.0, 4.0)));
+        let a = t.positions[1] - t.positions[0];
+        let b = t.positions[2] - t.positions[0];
+        let geometric = a.cross(b).normalized();
+        for normal in &t.normals {
+            assert!(
+                normal.distance(geometric) < 1e-12,
+                "{normal:?} vs {geometric:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirror_preserves_outward_winding_and_positive_volume() {
+        let m = Mesh::box_mesh(&Plane::world_xy(), 1.0, 2.0, 3.0);
+        let mirrored = m.transformed(&Mat4::mirror(&Plane::world_xy()));
+        assert!((mirrored.volume() - m.volume()).abs() < 1e-9);
+        for tri in &mirrored.indices {
+            let a = mirrored.positions[tri[0] as usize];
+            let b = mirrored.positions[tri[1] as usize];
+            let c = mirrored.positions[tri[2] as usize];
+            let geometric = (b - a).cross(c - a).normalized();
+            for index in tri {
+                assert!(mirrored.normals[*index as usize].dot(geometric) > 1.0 - 1e-12);
+            }
+        }
     }
 
     #[test]

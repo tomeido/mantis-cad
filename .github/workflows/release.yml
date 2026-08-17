@@ -1,0 +1,235 @@
+name: Native release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TRUNK_VERSION: 0.21.14
+
+jobs:
+  verify:
+    name: Verify source
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  verify-tag:
+    name: Verify release tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Match tag to workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          expected_tag="v${workspace_version}"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "release tag ${GITHUB_REF_NAME} does not match workspace version ${workspace_version}" >&2
+            exit 1
+          fi
+
+  build:
+    name: ${{ matrix.name }}
+    needs: [verify, verify-tag]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: linux-x86_64
+            archive: tar
+          - name: macOS Intel
+            runner: macos-26-intel
+            target: x86_64-apple-darwin
+            artifact: macos-x86_64
+            archive: mac
+          - name: macOS Apple Silicon
+            runner: macos-26
+            target: aarch64-apple-darwin
+            artifact: macos-aarch64
+            archive: mac
+          - name: Windows x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x86_64
+            archive: zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Activate Rust target
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.target }}"
+          rustup show active-toolchain
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxrandr-dev
+
+      - name: Cache Cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Build release binaries
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+          MANTIS_GIT_SHA: ${{ github.sha }}
+        run: >-
+          cargo build --locked --release
+          --target ${{ matrix.target }}
+          -p mantis-app -p mantis-server -p mantis-admin -p mantis-cli
+
+      - name: Package Unix release
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          package="mantis-cad-${GITHUB_REF_NAME}-${{ matrix.artifact }}"
+          mkdir -p "package/${package}/bin"
+          cp "target/${{ matrix.target }}/release/mantis-app" "package/${package}/"
+          cp "target/${{ matrix.target }}/release/mantis-server" "package/${package}/bin/"
+          cp "target/${{ matrix.target }}/release/mantis-admin" "package/${package}/bin/"
+          cp "target/${{ matrix.target }}/release/mantis-cli" "package/${package}/bin/"
+          cp README.md LICENSE SECURITY.md "package/${package}/"
+          tar -C package -czf "${package}.tar.gz" "${package}"
+
+      - name: Package macOS release
+        if: matrix.archive == 'mac'
+        shell: bash
+        run: |
+          package="mantis-cad-${GITHUB_REF_NAME}-${{ matrix.artifact }}"
+          app="package/${package}/MantisCAD.app/Contents"
+          mkdir -p "${app}/MacOS" "package/${package}/bin"
+          cp "target/${{ matrix.target }}/release/mantis-app" "${app}/MacOS/MantisCAD"
+          sed "s/@VERSION@/${GITHUB_REF_NAME#v}/g" packaging/macos/Info.plist > "${app}/Info.plist"
+          cp "target/${{ matrix.target }}/release/mantis-server" "package/${package}/bin/"
+          cp "target/${{ matrix.target }}/release/mantis-admin" "package/${package}/bin/"
+          cp "target/${{ matrix.target }}/release/mantis-cli" "package/${package}/bin/"
+          cp README.md LICENSE SECURITY.md "package/${package}/"
+          ditto -c -k --sequesterRsrc --keepParent "package/${package}" "${package}.zip"
+
+      - name: Package Windows release
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $package = "mantis-cad-$env:GITHUB_REF_NAME-${{ matrix.artifact }}"
+          New-Item -ItemType Directory -Force "package/$package/bin" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/mantis-app.exe" "package/$package/MantisCAD.exe"
+          Copy-Item "target/${{ matrix.target }}/release/mantis-server.exe" "package/$package/bin/"
+          Copy-Item "target/${{ matrix.target }}/release/mantis-admin.exe" "package/$package/bin/"
+          Copy-Item "target/${{ matrix.target }}/release/mantis-cli.exe" "package/$package/bin/"
+          Copy-Item README.md, LICENSE, SECURITY.md "package/$package/"
+          Compress-Archive -Path "package/$package" -DestinationPath "$package.zip"
+
+      - name: Upload packaged release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mantis-cad-${{ matrix.artifact }}
+          path: mantis-cad-*
+          if-no-files-found: error
+          retention-days: 14
+
+  web:
+    name: Web bundle
+    needs: [verify, verify-tag]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Activate pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Cargo and Trunk
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/trunk
+            target
+          key: release-web-${{ env.TRUNK_VERSION }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Install Trunk
+        run: |
+          if ! command -v trunk >/dev/null || [ "$(trunk --version | awk '{print $2}')" != "$TRUNK_VERSION" ]; then
+            cargo install --locked --version "$TRUNK_VERSION" trunk
+          fi
+
+      - name: Build and package web application
+        working-directory: crates/mantis-app
+        run: |
+          package="mantis-cad-${GITHUB_REF_NAME}-web"
+          output="${GITHUB_WORKSPACE}/package/${package}"
+          trunk build index.html --release --locked --dist "${output}" --public-url /
+          cp "${GITHUB_WORKSPACE}/LICENSE" "${output}/"
+          tar -C "${GITHUB_WORKSPACE}/package" -czf "${GITHUB_WORKSPACE}/${package}.tar.gz" "${package}"
+
+      - name: Upload web bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mantis-cad-web
+          path: mantis-cad-*-web.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish checksummed GitHub Release
+    needs: [build, web]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: mantis-cad-*
+          path: release
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: release
+        run: sha256sum mantis-cad-* > SHA256SUMS
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          elif [[ "$tag" == v0.* ]]; then
+            gh release create "$tag" release/* --verify-tag --generate-notes --prerelease
+          else
+            gh release create "$tag" release/* --verify-tag --generate-notes
+          fi

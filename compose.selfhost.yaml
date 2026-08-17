@@ -1,0 +1,50 @@
+name: mantis-cad-selfhost
+
+services:
+  mantis:
+    image: mantis-cad:selfhost
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        MANTIS_GIT_SHA: ${MANTIS_GIT_SHA:-unknown}
+        MANTIS_WEB_BASE_PATH: ${MANTIS_WEB_BASE_PATH:-/mantis}
+        MANTIS_WEB_PUBLIC_URL: ${MANTIS_WEB_PUBLIC_URL:-/mantis/}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    expose:
+      - "7878"
+    environment:
+      PORT: "7878"
+      MANTIS_DATA_DIR: /data
+      MANTIS_DIST_DIR: /app/dist
+      MANTIS_PUBLIC_BASE_PATH: ${MANTIS_WEB_BASE_PATH:-/mantis}
+      MANTIS_OPERATOR_KEYS: ${MANTIS_OPERATOR_KEYS:-}
+      MANTIS_ALLOWED_ORIGINS: ${MANTIS_ALLOWED_ORIGINS:-}
+      MANTIS_MAX_PROJECT_BYTES: ${MANTIS_MAX_PROJECT_BYTES:-25165824}
+    volumes:
+      - mantis-data:/data
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:7878/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - caddy
+
+volumes:
+  mantis-data:
+
+networks:
+  caddy:
+    external: true
+    name: ${MANTIS_EDGE_NETWORK:-domeido-edge}

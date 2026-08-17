@@ -4,9 +4,9 @@
 //! - Nodes evaluate in `Graph::topo_order()`.
 //! - Unknown `type_name` -> error entry "unknown component: X".
 //! - Input gathering, per input port i of the component:
-//!     wired  -> the upstream node's output value at that port
-//!               (upstream errored -> this node errors "upstream error");
-//!     unwired-> port default if Some, else Value::Null.
+//!   wired -> the upstream node's output value at that port
+//!   (upstream errored -> this node errors "upstream error");
+//!   unwired -> port default if Some, else Value::Null.
 //! - Longest-list matching: if any Access::Item port holds a Value::List, the
 //!   component runs N times (N = max len over those ports; empty list -> node
 //!   evaluates to empty lists). Run i takes list[min(i, len-1)] (last repeats),
@@ -19,13 +19,13 @@
 //!   `kind_matches` -> node error naming the port. Null on a defaultless port
 //!   -> error "input <name> missing".
 //! - Component eval Err(msg) -> node error; outputs absent for errored nodes.
-//! - Cache: a node re-evaluates iff marked dirty (invalidate/invalidate_all,
-//!   including downstream propagation) or its inputs changed; otherwise cached
-//!   outputs are reused. Structure changes (connect/disconnect/remove) must
-//!   dirty affected nodes + downstream (the app calls `invalidate`).
+//! - Cache: a node re-evaluates iff marked dirty (invalidate/invalidate_all),
+//!   its type/parameters/wiring changed, or an upstream output changed;
+//!   otherwise cached outputs are reused. The evaluator detects graph edits
+//!   itself, so callers do not have to get cache invalidation exactly right.
 
 use crate::component::{Access, Component, PortSpec, Registry};
-use crate::graph::{Graph, NodeId};
+use crate::graph::{Edge, Graph, NodeId};
 use crate::value::{ParamValue, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,19 +38,52 @@ pub struct EvalOutput {
 
 /// Reusable evaluator holding the cache across frames.
 ///
-/// A node is "dirty" when it has no cache entry; `invalidate` removes the
-/// entry for a node and everything downstream of it. During `evaluate`, a
-/// node additionally re-evaluates when any wired upstream node produced a
-/// different output than the previous pass (or errored).
+/// Each cache entry includes the evaluation-relevant part of the node and its
+/// incoming wiring. `evaluate` therefore remains correct even when a caller
+/// applies a `GraphOp` without explicitly calling `invalidate`. The explicit
+/// invalidation methods remain useful when external component state changes.
 #[derive(Default)]
 pub struct Evaluator {
-    cache: BTreeMap<NodeId, Vec<Value>>,
+    cache: BTreeMap<NodeId, CacheEntry>,
     dirty_all: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct CacheSignature {
+    type_name: String,
+    params: BTreeMap<String, ParamValue>,
+    /// (target input port, source node, source output port), sorted so the
+    /// signature is independent of incidental edge insertion order.
+    incoming: Vec<(u16, NodeId, u16)>,
+}
+
+impl CacheSignature {
+    fn for_node(
+        graph: &Graph,
+        id: NodeId,
+        incoming: &[(u16, NodeId, u16)],
+    ) -> Option<CacheSignature> {
+        let node = graph.nodes.get(&id)?;
+        Some(CacheSignature {
+            type_name: node.type_name.clone(),
+            params: node.params.clone(),
+            incoming: incoming.to_vec(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct CacheEntry {
+    signature: CacheSignature,
+    outputs: Vec<Value>,
 }
 
 impl Evaluator {
     pub fn new() -> Evaluator {
-        Evaluator { cache: BTreeMap::new(), dirty_all: true }
+        Evaluator {
+            cache: BTreeMap::new(),
+            dirty_all: true,
+        }
     }
 
     /// Mark `id` and everything downstream dirty.
@@ -88,9 +121,28 @@ impl Evaluator {
         // Nodes whose outputs this pass differ from the previous pass (or
         // which errored) — anything wired to them must re-evaluate.
         let mut changed: BTreeSet<NodeId> = BTreeSet::new();
+        // Build evaluation-relevant incoming wiring once. Scanning the whole
+        // edge list separately for every node would make a cached pass O(N*E).
+        let mut incoming_signatures: BTreeMap<NodeId, Vec<(u16, NodeId, u16)>> = BTreeMap::new();
+        let mut incoming_edges: BTreeMap<(NodeId, u16), Edge> = BTreeMap::new();
+        for edge in &graph.edges {
+            incoming_signatures.entry(edge.to.0).or_default().push((
+                edge.to.1,
+                edge.from.0,
+                edge.from.1,
+            ));
+            // Graph::incoming returns the first edge if handed malformed data
+            // with duplicate target ports, so preserve that behavior.
+            incoming_edges.entry(edge.to).or_insert(*edge);
+        }
+        for incoming in incoming_signatures.values_mut() {
+            incoming.sort_unstable();
+        }
 
         for id in graph.topo_order() {
-            let Some(node) = graph.nodes.get(&id) else { continue };
+            let Some(node) = graph.nodes.get(&id) else {
+                continue;
+            };
             let Some(comp) = reg.get(&node.type_name).cloned() else {
                 self.cache.remove(&id);
                 changed.insert(id);
@@ -99,11 +151,24 @@ impl Evaluator {
                 continue;
             };
             let specs = comp.inputs();
+            let signature = CacheSignature::for_node(
+                graph,
+                id,
+                incoming_signatures
+                    .get(&id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )
+            .expect("topological order only contains existing nodes");
 
-            let mut needs = !self.cache.contains_key(&id);
+            let mut needs = self
+                .cache
+                .get(&id)
+                .map(|entry| entry.signature != signature)
+                .unwrap_or(true);
             let mut upstream_err = false;
             for i in 0..specs.len() {
-                if let Some(e) = graph.incoming((id, i as u16)) {
+                if let Some(e) = incoming_edges.get(&(id, i as u16)) {
                     if changed.contains(&e.from.0) {
                         needs = true;
                     }
@@ -116,7 +181,11 @@ impl Evaluator {
             }
 
             if !needs {
-                let vals = self.cache.get(&id).cloned().unwrap_or_default();
+                let vals = self
+                    .cache
+                    .get(&id)
+                    .map(|entry| entry.outputs.clone())
+                    .unwrap_or_default();
                 out.outputs.insert(id, vals);
                 continue;
             }
@@ -127,13 +196,26 @@ impl Evaluator {
                 continue;
             }
 
-            match run_node(graph, id, comp.as_ref(), &specs, &node.params, &out.outputs) {
+            match run_node(
+                id,
+                comp.as_ref(),
+                &specs,
+                &node.params,
+                &incoming_edges,
+                &out.outputs,
+            ) {
                 Ok(vals) => {
-                    if self.cache.get(&id) != Some(&vals) {
+                    if self.cache.get(&id).map(|entry| &entry.outputs) != Some(&vals) {
                         changed.insert(id);
                     }
                     out.outputs.insert(id, vals.clone());
-                    self.cache.insert(id, vals);
+                    self.cache.insert(
+                        id,
+                        CacheEntry {
+                            signature,
+                            outputs: vals,
+                        },
+                    );
                 }
                 Err(msg) => {
                     self.cache.remove(&id);
@@ -148,17 +230,33 @@ impl Evaluator {
 
 /// Gather inputs for one node, apply longest-list matching, run the component.
 fn run_node(
-    graph: &Graph,
     id: NodeId,
     comp: &dyn Component,
     specs: &[PortSpec],
     params: &BTreeMap<String, ParamValue>,
+    incoming: &BTreeMap<(NodeId, u16), Edge>,
     ready: &BTreeMap<NodeId, Vec<Value>>,
 ) -> Result<Vec<Value>, String> {
+    // Port indices are deliberately not rejected by Graph::apply so old peers
+    // can carry graphs made by newer component versions. They must still be
+    // surfaced at evaluation time instead of silently discarding the wire.
+    if let Some(edge) = incoming
+        .range((id, 0)..=(id, u16::MAX))
+        .map(|(_, edge)| edge)
+        .find(|edge| edge.to.1 as usize >= specs.len())
+    {
+        return Err(format!(
+            "input port {} out of range for {} ({} input port(s))",
+            edge.to.1,
+            comp.type_name(),
+            specs.len()
+        ));
+    }
+
     // 1. Gather one raw value per input port.
     let mut raw: Vec<Value> = Vec::with_capacity(specs.len());
     for (i, spec) in specs.iter().enumerate() {
-        let mut v = match graph.incoming((id, i as u16)) {
+        let mut v = match incoming.get(&(id, i as u16)) {
             Some(e) => {
                 let outs = ready
                     .get(&e.from.0)
@@ -274,12 +372,19 @@ mod tests {
         NodeId(n)
     }
     fn add_node(g: &mut Graph, id: u128, ty: &str) {
-        g.apply(&GraphOp::AddNode { id: nid(id), type_name: ty.into(), pos: (0.0, 0.0) })
-            .unwrap();
+        g.apply(&GraphOp::AddNode {
+            id: nid(id),
+            type_name: ty.into(),
+            pos: (0.0, 0.0),
+        })
+        .unwrap();
     }
     fn connect(g: &mut Graph, from: (u128, u16), to: (u128, u16)) {
-        g.apply(&GraphOp::Connect { from: (nid(from.0), from.1), to: (nid(to.0), to.1) })
-            .unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(from.0), from.1),
+            to: (nid(to.0), to.1),
+        })
+        .unwrap();
     }
     fn set_num(g: &mut Graph, id: u128, key: &str, v: f64) {
         g.apply(&GraphOp::SetParam {
@@ -290,8 +395,12 @@ mod tests {
         .unwrap();
     }
     fn set_bool(g: &mut Graph, id: u128, key: &str, v: bool) {
-        g.apply(&GraphOp::SetParam { id: nid(id), key: key.into(), value: ParamValue::Bool(v) })
-            .unwrap();
+        g.apply(&GraphOp::SetParam {
+            id: nid(id),
+            key: key.into(),
+            value: ParamValue::Bool(v),
+        })
+        .unwrap();
     }
     fn slider(g: &mut Graph, id: u128, value: f64) {
         add_node(g, id, "number_slider");
@@ -536,8 +645,52 @@ mod tests {
         let out = ev.evaluate(&g, &reg);
         assert_eq!(out.outputs[&nid(3)][0], Value::Number(-2.0));
         // Rewire negate to the other slider.
-        g.apply(&GraphOp::Connect { from: (nid(2), 0), to: (nid(3), 0) }).unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(2), 0),
+            to: (nid(3), 0),
+        })
+        .unwrap();
         ev.invalidate(&g, nid(3));
+        let out = ev.evaluate(&g, &reg);
+        assert_eq!(out.outputs[&nid(3)][0], Value::Number(-9.0));
+    }
+
+    #[test]
+    fn cache_detects_param_change_without_manual_invalidation() {
+        let mut g = Graph::new();
+        slider(&mut g, 1, 2.0);
+        add_node(&mut g, 2, "negate");
+        connect(&mut g, (1, 0), (2, 0));
+        let mut ev = Evaluator::new();
+        let reg = Registry::standard();
+
+        let out = ev.evaluate(&g, &reg);
+        assert_eq!(out.outputs[&nid(2)][0], Value::Number(-2.0));
+
+        set_num(&mut g, 1, "value", 7.0);
+        let out = ev.evaluate(&g, &reg);
+        assert_eq!(out.outputs[&nid(1)][0], Value::Number(7.0));
+        assert_eq!(out.outputs[&nid(2)][0], Value::Number(-7.0));
+    }
+
+    #[test]
+    fn cache_detects_rewire_without_manual_invalidation() {
+        let mut g = Graph::new();
+        slider(&mut g, 1, 2.0);
+        slider(&mut g, 2, 9.0);
+        add_node(&mut g, 3, "negate");
+        connect(&mut g, (1, 0), (3, 0));
+        let mut ev = Evaluator::new();
+        let reg = Registry::standard();
+
+        let out = ev.evaluate(&g, &reg);
+        assert_eq!(out.outputs[&nid(3)][0], Value::Number(-2.0));
+
+        g.apply(&GraphOp::Connect {
+            from: (nid(2), 0),
+            to: (nid(3), 0),
+        })
+        .unwrap();
         let out = ev.evaluate(&g, &reg);
         assert_eq!(out.outputs[&nid(3)][0], Value::Number(-9.0));
     }
@@ -605,7 +758,10 @@ mod tests {
         connect(&mut g, (5, 2), (6, 2));
         let out = eval(&g);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        assert_eq!(out.outputs[&nid(6)][0], Value::Vector(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(
+            out.outputs[&nid(6)][0],
+            Value::Vector(Vec3::new(1.0, 2.0, 3.0))
+        );
     }
 
     #[test]
@@ -628,9 +784,36 @@ mod tests {
         slider(&mut g, 1, 1.0);
         add_node(&mut g, 2, "negate");
         // Slider only has output port 0; wire from port 5.
-        g.apply(&GraphOp::Connect { from: (nid(1), 5), to: (nid(2), 0) }).unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(1), 5),
+            to: (nid(2), 0),
+        })
+        .unwrap();
         let out = eval(&g);
-        assert!(out.errors[&nid(2)].contains("out of range"), "{:?}", out.errors);
+        assert!(
+            out.errors[&nid(2)].contains("out of range"),
+            "{:?}",
+            out.errors
+        );
+    }
+
+    #[test]
+    fn target_input_port_out_of_range_errors_instead_of_being_ignored() {
+        let mut g = Graph::new();
+        slider(&mut g, 1, 1.0);
+        add_node(&mut g, 2, "negate");
+        // Negate only has input port 0; a newer/invalid graph may still carry
+        // this edge because Graph::apply intentionally defers port validation.
+        g.apply(&GraphOp::Connect {
+            from: (nid(1), 0),
+            to: (nid(2), 5),
+        })
+        .unwrap();
+        let out = eval(&g);
+        let err = &out.errors[&nid(2)];
+        assert!(err.contains("input port 5"), "{err}");
+        assert!(err.contains("out of range"), "{err}");
+        assert!(!out.outputs.contains_key(&nid(2)));
     }
 
     // ---- pipelines through mantis-kernel geometry ----

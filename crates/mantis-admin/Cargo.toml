@@ -1,0 +1,18 @@
+[package]
+name = "mantis-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mantis-chain = { workspace = true }
+mantis-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+getrandom = { workspace = true }
+argon2 = "0.5"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+rpassword = "7.4"
+ureq = { version = "2.12", features = ["json"] }
+url = "2"

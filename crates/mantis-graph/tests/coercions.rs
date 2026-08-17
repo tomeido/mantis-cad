@@ -12,16 +12,35 @@ fn nid(n: u128) -> NodeId {
 fn point_wired_into_plane_port_is_accepted() {
     let reg = Registry::standard();
     let mut g = Graph::new();
-    g.apply(&GraphOp::AddNode { id: nid(1), type_name: "point_xyz".into(), pos: (0.0, 0.0) })
-        .unwrap();
-    g.apply(&GraphOp::AddNode { id: nid(2), type_name: "circle".into(), pos: (0.0, 0.0) })
-        .unwrap();
-    g.apply(&GraphOp::Connect { from: (nid(1), 0), to: (nid(2), 0) }).unwrap();
+    g.apply(&GraphOp::AddNode {
+        id: nid(1),
+        type_name: "point_xyz".into(),
+        pos: (0.0, 0.0),
+    })
+    .unwrap();
+    g.apply(&GraphOp::AddNode {
+        id: nid(2),
+        type_name: "circle".into(),
+        pos: (0.0, 0.0),
+    })
+    .unwrap();
+    g.apply(&GraphOp::Connect {
+        from: (nid(1), 0),
+        to: (nid(2), 0),
+    })
+    .unwrap();
 
     let mut ev = Evaluator::new();
     let out = ev.evaluate(&g, &reg);
-    assert!(out.errors.get(&nid(2)).is_none(), "circle errored: {:?}", out.errors.get(&nid(2)));
-    assert!(matches!(out.outputs.get(&nid(2)).and_then(|v| v.first()), Some(Value::Curve(_))));
+    assert!(
+        !out.errors.contains_key(&nid(2)),
+        "circle errored: {:?}",
+        out.errors.get(&nid(2))
+    );
+    assert!(matches!(
+        out.outputs.get(&nid(2)).and_then(|v| v.first()),
+        Some(Value::Curve(_))
+    ));
 }
 
 #[test]
@@ -43,21 +62,58 @@ fn nonfinite_vector_becomes_a_clean_node_error() {
     let reg = Registry::standard();
     let mut g = Graph::new();
     // slider with value = 1e308
-    g.apply(&GraphOp::AddNode { id: nid(1), type_name: "number_slider".into(), pos: (0.0, 0.0) })
-        .unwrap();
+    g.apply(&GraphOp::AddNode {
+        id: nid(1),
+        type_name: "number_slider".into(),
+        pos: (0.0, 0.0),
+    })
+    .unwrap();
     for (k, v) in [("min", 0.0), ("max", f64::MAX), ("value", f64::MAX)] {
-        g.apply(&GraphOp::SetParam { id: nid(1), key: k.into(), value: ParamValue::Number(v) }).unwrap();
+        g.apply(&GraphOp::SetParam {
+            id: nid(1),
+            key: k.into(),
+            value: ParamValue::Number(v),
+        })
+        .unwrap();
     }
-    g.apply(&GraphOp::AddNode { id: nid(2), type_name: "multiply".into(), pos: (0.0, 0.0) })
-        .unwrap();
-    g.apply(&GraphOp::Connect { from: (nid(1), 0), to: (nid(2), 0) }).unwrap();
-    g.apply(&GraphOp::Connect { from: (nid(1), 0), to: (nid(2), 1) }).unwrap(); // MAX*MAX = +inf
-    g.apply(&GraphOp::AddNode { id: nid(3), type_name: "vector_xyz".into(), pos: (0.0, 0.0) })
-        .unwrap();
-    g.apply(&GraphOp::Connect { from: (nid(2), 0), to: (nid(3), 0) }).unwrap(); // x = +inf
-    g.apply(&GraphOp::AddNode { id: nid(4), type_name: "line".into(), pos: (0.0, 0.0) })
-        .unwrap();
-    g.apply(&GraphOp::Connect { from: (nid(3), 0), to: (nid(4), 1) }).unwrap(); // line.b = (inf,0,0)
+    g.apply(&GraphOp::AddNode {
+        id: nid(2),
+        type_name: "multiply".into(),
+        pos: (0.0, 0.0),
+    })
+    .unwrap();
+    g.apply(&GraphOp::Connect {
+        from: (nid(1), 0),
+        to: (nid(2), 0),
+    })
+    .unwrap();
+    g.apply(&GraphOp::Connect {
+        from: (nid(1), 0),
+        to: (nid(2), 1),
+    })
+    .unwrap(); // MAX*MAX = +inf
+    g.apply(&GraphOp::AddNode {
+        id: nid(3),
+        type_name: "vector_xyz".into(),
+        pos: (0.0, 0.0),
+    })
+    .unwrap();
+    g.apply(&GraphOp::Connect {
+        from: (nid(2), 0),
+        to: (nid(3), 0),
+    })
+    .unwrap(); // x = +inf
+    g.apply(&GraphOp::AddNode {
+        id: nid(4),
+        type_name: "line".into(),
+        pos: (0.0, 0.0),
+    })
+    .unwrap();
+    g.apply(&GraphOp::Connect {
+        from: (nid(3), 0),
+        to: (nid(4), 1),
+    })
+    .unwrap(); // line.b = (inf,0,0)
 
     let mut ev = Evaluator::new();
     let out = ev.evaluate(&g, &reg);

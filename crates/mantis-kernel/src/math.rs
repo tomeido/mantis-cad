@@ -14,10 +14,26 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
-    pub const ZERO: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
-    pub const X: Vec3 = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
-    pub const Y: Vec3 = Vec3 { x: 0.0, y: 1.0, z: 0.0 };
-    pub const Z: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 1.0 };
+    pub const ZERO: Vec3 = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const X: Vec3 = Vec3 {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const Y: Vec3 = Vec3 {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    pub const Z: Vec3 = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
 
     pub fn new(x: f64, y: f64, z: f64) -> Self {
         Vec3 { x, y, z }
@@ -186,19 +202,61 @@ impl Mat4 {
             m[0][2] * p.x + m[1][2] * p.y + m[2][2] * p.z,
         )
     }
+
+    /// Determinant of the affine linear 3x3 portion.
+    pub fn linear_determinant(&self) -> f64 {
+        let m = &self.0;
+        let (a, b, c) = (m[0][0], m[1][0], m[2][0]);
+        let (d, e, f) = (m[0][1], m[1][1], m[2][1]);
+        let (g, h, i) = (m[0][2], m[1][2], m[2][2]);
+        a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    }
+
+    /// Transform a surface normal with the inverse-transpose of the affine
+    /// linear 3x3 portion. Returns zero for a singular/non-finite transform.
+    ///
+    /// Unlike `transform_vector`, this remains perpendicular to transformed
+    /// tangent vectors under non-uniform scale and shear.
+    pub fn transform_normal(&self, n: Vec3) -> Vec3 {
+        if !n.is_finite() {
+            return Vec3::ZERO;
+        }
+        let m = &self.0;
+        let (a, b, c) = (m[0][0], m[1][0], m[2][0]);
+        let (d, e, f) = (m[0][1], m[1][1], m[2][1]);
+        let (g, h, i) = (m[0][2], m[1][2], m[2][2]);
+        let det = self.linear_determinant();
+        let scale = [a, b, c, d, e, f, g, h, i]
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0, f64::max);
+        if !det.is_finite() || !scale.is_finite() || scale == 0.0 {
+            return Vec3::ZERO;
+        }
+        if det.abs() <= EPS * scale * scale * scale {
+            return Vec3::ZERO;
+        }
+
+        Vec3::new(
+            ((e * i - f * h) * n.x + (f * g - d * i) * n.y + (d * h - e * g) * n.z) / det,
+            ((c * h - b * i) * n.x + (a * i - c * g) * n.y + (b * g - a * h) * n.z) / det,
+            ((b * f - c * e) * n.x + (c * d - a * f) * n.y + (a * e - b * d) * n.z) / det,
+        )
+        .normalized()
+    }
 }
 
 impl Mul for Mat4 {
     type Output = Mat4;
     fn mul(self, o: Mat4) -> Mat4 {
         let mut r = [[0.0; 4]; 4];
-        for c in 0..4 {
-            for row in 0..4 {
+        for (c, column) in r.iter_mut().enumerate() {
+            for (row, cell) in column.iter_mut().enumerate() {
                 let mut acc = 0.0;
                 for k in 0..4 {
                     acc += self.0[k][row] * o.0[c][k];
                 }
-                r[c][row] = acc;
+                *cell = acc;
             }
         }
         Mat4(r)
@@ -216,7 +274,11 @@ pub struct Plane {
 impl Plane {
     /// World XY plane at `origin`.
     pub fn world_xy_at(origin: Vec3) -> Plane {
-        Plane { origin, x_axis: Vec3::X, y_axis: Vec3::Y }
+        Plane {
+            origin,
+            x_axis: Vec3::X,
+            y_axis: Vec3::Y,
+        }
     }
     pub fn world_xy() -> Plane {
         Plane::world_xy_at(Vec3::ZERO)
@@ -229,7 +291,11 @@ impl Plane {
         }
         let x_axis = n.any_perpendicular();
         let y_axis = n.cross(x_axis).normalized();
-        Plane { origin, x_axis, y_axis }
+        Plane {
+            origin,
+            x_axis,
+            y_axis,
+        }
     }
     pub fn normal(&self) -> Vec3 {
         self.x_axis.cross(self.y_axis).normalized()
@@ -259,15 +325,31 @@ pub struct BBox {
 
 impl BBox {
     pub const EMPTY: BBox = BBox {
-        min: Vec3 { x: f64::INFINITY, y: f64::INFINITY, z: f64::INFINITY },
-        max: Vec3 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY, z: f64::NEG_INFINITY },
+        min: Vec3 {
+            x: f64::INFINITY,
+            y: f64::INFINITY,
+            z: f64::INFINITY,
+        },
+        max: Vec3 {
+            x: f64::NEG_INFINITY,
+            y: f64::NEG_INFINITY,
+            z: f64::NEG_INFINITY,
+        },
     };
     pub fn is_empty(&self) -> bool {
         self.min.x > self.max.x
     }
     pub fn include(&mut self, p: Vec3) {
-        self.min = Vec3::new(self.min.x.min(p.x), self.min.y.min(p.y), self.min.z.min(p.z));
-        self.max = Vec3::new(self.max.x.max(p.x), self.max.y.max(p.y), self.max.z.max(p.z));
+        self.min = Vec3::new(
+            self.min.x.min(p.x),
+            self.min.y.min(p.y),
+            self.min.z.min(p.z),
+        );
+        self.max = Vec3::new(
+            self.max.x.max(p.x),
+            self.max.y.max(p.y),
+            self.max.z.max(p.z),
+        );
     }
     pub fn union(mut self, o: BBox) -> BBox {
         if !o.is_empty() {
@@ -321,5 +403,17 @@ mod tests {
         assert!(pl.x_axis.dot(pl.y_axis).abs() < 1e-12);
         assert!((pl.normal().length() - 1.0).abs() < 1e-12);
         assert!((pl.normal() - Vec3::new(1.0, 1.0, 1.0).normalized()).length() < 1e-9);
+    }
+
+    #[test]
+    fn inverse_transpose_normal_stays_perpendicular_under_nonuniform_scale() {
+        let m = Mat4::scaling(Vec3::new(2.0, 3.0, 4.0));
+        let tangent_a = Vec3::X;
+        let tangent_b = Vec3::new(0.0, 1.0, 1.0);
+        let normal = tangent_a.cross(tangent_b).normalized();
+        let transformed = m.transform_normal(normal);
+        assert!(transformed.dot(m.transform_vector(tangent_a)).abs() < 1e-12);
+        assert!(transformed.dot(m.transform_vector(tangent_b)).abs() < 1e-12);
+        assert!((transformed.length() - 1.0).abs() < 1e-12);
     }
 }

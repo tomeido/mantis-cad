@@ -17,7 +17,10 @@ struct OpRecorder {
 
 impl OpRecorder {
     fn new() -> OpRecorder {
-        OpRecorder { graph: Graph::new(), ops: Vec::new() }
+        OpRecorder {
+            graph: Graph::new(),
+            ops: Vec::new(),
+        }
     }
 
     fn push(&mut self, op: GraphOp) -> Result<(), String> {
@@ -29,7 +32,11 @@ impl OpRecorder {
     }
 
     fn add(&mut self, id: u128, type_name: &str, pos: (f32, f32)) -> Result<(), String> {
-        self.push(GraphOp::AddNode { id: NodeId(id), type_name: type_name.into(), pos })
+        self.push(GraphOp::AddNode {
+            id: NodeId(id),
+            type_name: type_name.into(),
+            pos,
+        })
     }
 
     fn set_num(&mut self, id: u128, key: &str, v: f64) -> Result<(), String> {

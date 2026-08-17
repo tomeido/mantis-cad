@@ -56,7 +56,11 @@ pub fn ui(ui: &mut egui::Ui, doc: &mut Document, log: &[String], errors: &mut Ve
             let mut clicked: Option<usize> = None;
             for (i, b) in doc.chain.blocks.iter().enumerate().rev() {
                 let msg: String = b.message.chars().take(28).collect();
-                let ellipsis = if b.message.chars().count() > 28 { "…" } else { "" };
+                let ellipsis = if b.message.chars().count() > 28 {
+                    "…"
+                } else {
+                    ""
+                };
                 let text = format!(
                     "#{} {} · {}{} · {} op{} · {}",
                     b.index,

@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  workflow_call:
+  pull_request:
+
+concurrency:
+  # Reusable calls from the container and native-release workflows can run for
+  # the same tag at the same time. Include the caller workflow so they cannot
+  # cancel one another.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TRUNK_VERSION: 0.21.14
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install native GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxrandr-dev
+
+      - name: Activate pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+  web:
+    name: Web build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Activate pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Cargo and Trunk
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/trunk
+            target
+          key: web-${{ runner.os }}-${{ env.TRUNK_VERSION }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Install Trunk
+        run: |
+          if ! command -v trunk >/dev/null || [ "$(trunk --version | awk '{print $2}')" != "$TRUNK_VERSION" ]; then
+            cargo install --locked --version "$TRUNK_VERSION" trunk
+          fi
+
+      - name: Check wasm target
+        run: cargo check --locked -p mantis-app --target wasm32-unknown-unknown
+
+      - name: Build web application
+        working-directory: crates/mantis-app
+        run: >-
+          trunk build index.html --release --locked
+          --dist "${GITHUB_WORKSPACE}/dist" --public-url /
+
+      - name: Upload web bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # Keep validation artifacts distinct from the checksummed release
+          # bundle produced by release.yml in the same workflow run.
+          name: ci-web-bundle
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  container-smoke:
+    name: Container smoke test
+    needs: [rust, web]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build image
+        run: docker build --build-arg MANTIS_GIT_SHA="${GITHUB_SHA}" --tag mantis-cad:ci .
+
+      - name: Start image and verify health
+        run: |
+          set -euo pipefail
+          docker volume create mantis-ci-data
+          docker run --detach \
+            --name mantis-ci \
+            --publish 127.0.0.1:7878:7878 \
+            --read-only \
+            --tmpfs /tmp:size=32m,mode=1777 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --volume mantis-ci-data:/data \
+            mantis-cad:ci
+          wait_ready() {
+            for attempt in $(seq 1 30); do
+              echo "readiness attempt ${attempt}/30"
+              if curl --fail --silent http://127.0.0.1:7878/readyz >/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            docker logs mantis-ci
+            return 1
+          }
+          check_endpoints() {
+            curl --fail --silent http://127.0.0.1:7878/ >/dev/null
+            curl --fail --silent http://127.0.0.1:7878/healthz >/dev/null
+            info_json="$(curl --fail --silent http://127.0.0.1:7878/api/v2/info)"
+            INFO_JSON="${info_json}" python3 -c \
+              'import json, os, sys; assert json.loads(os.environ["INFO_JSON"])["git_sha"] == sys.argv[1]' \
+              "${GITHUB_SHA}"
+            curl --fail --silent http://127.0.0.1:7878/api/v2/openapi.json >/dev/null
+            curl --fail --silent http://127.0.0.1:7878/api/v2/projects >/dev/null
+            test "$(docker exec mantis-ci id -u)" = "10001"
+          }
+          wait_ready
+          check_endpoints
+          docker restart mantis-ci
+          wait_ready
+          check_endpoints
+
+      - name: Clean up smoke test
+        if: always()
+        run: |
+          docker rm --force mantis-ci 2>/dev/null || true
+          docker volume rm mantis-ci-data 2>/dev/null || true

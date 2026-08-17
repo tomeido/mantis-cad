@@ -3,11 +3,13 @@
 
 mod app;
 mod chain_panel;
+mod key_backup;
 mod node_editor;
 mod state;
 mod sync;
 mod util;
 mod viewport;
+mod workspace;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
@@ -55,9 +57,9 @@ fn main() {
         if let Some(loading) = document.get_element_by_id("loading") {
             match &result {
                 Ok(()) => loading.remove(),
-                Err(e) => loading.set_text_content(Some(&format!(
-                    "MantisCAD failed to start: {e:?}"
-                ))),
+                Err(e) => {
+                    loading.set_text_content(Some(&format!("MantisCAD failed to start: {e:?}")))
+                }
             }
         }
     });

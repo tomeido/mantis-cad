@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 fn pnum(params: &BTreeMap<String, ParamValue>, key: &str, default: f64) -> f64 {
-    params.get(key).and_then(|p| p.as_number()).unwrap_or(default)
+    params
+        .get(key)
+        .and_then(|p| p.as_number())
+        .unwrap_or(default)
 }
 
 pub(crate) fn all() -> Vec<Arc<dyn Component>> {
@@ -43,7 +46,10 @@ pub(crate) fn all() -> Vec<Arc<dyn Component>> {
             inputs: Vec::new,
             outputs: || vec![PortSpec::item("value", ValueKind::Bool)],
             eval: |_, params| {
-                let v = params.get("value").and_then(|p| p.as_bool()).unwrap_or(false);
+                let v = params
+                    .get("value")
+                    .and_then(|p| p.as_bool())
+                    .unwrap_or(false);
                 Ok(vec![Value::Bool(v)])
             },
         }),

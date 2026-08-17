@@ -13,12 +13,26 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Curve {
-    Line { a: Vec3, b: Vec3 },
+    Line {
+        a: Vec3,
+        b: Vec3,
+    },
     /// `closed` implies an implicit segment from last back to first point.
-    Polyline { points: Vec<Vec3>, closed: bool },
-    Circle { plane: Plane, radius: f64 },
+    Polyline {
+        points: Vec<Vec3>,
+        closed: bool,
+    },
+    Circle {
+        plane: Plane,
+        radius: f64,
+    },
     /// Angles in radians measured in the plane from x_axis toward y_axis.
-    Arc { plane: Plane, radius: f64, start_angle: f64, end_angle: f64 },
+    Arc {
+        plane: Plane,
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+    },
     Nurbs(NurbsCurve),
 }
 
@@ -39,15 +53,11 @@ pub struct NurbsCurve {
 fn clamped_uniform_knots(n: usize, degree: usize) -> Vec<f64> {
     let mut knots = Vec::with_capacity(n + degree + 1);
     let interior = n - degree; // number of spans; n > degree assumed
-    for _ in 0..=degree {
-        knots.push(0.0);
-    }
+    knots.resize(degree + 1, 0.0);
     for i in 1..interior {
         knots.push(i as f64 / interior as f64);
     }
-    for _ in 0..=degree {
-        knots.push(1.0);
-    }
+    knots.resize(knots.len() + degree + 1, 1.0);
     knots
 }
 
@@ -73,7 +83,12 @@ impl NurbsCurve {
             cps.extend_from_slice(&points[..degree]);
             let m = cps.len(); // n + degree
             let knots = (0..m + degree + 1).map(|i| i as f64).collect();
-            Some(NurbsCurve { degree, control_points: cps, weights: vec![1.0; m], knots })
+            Some(NurbsCurve {
+                degree,
+                control_points: cps,
+                weights: vec![1.0; m],
+                knots,
+            })
         } else {
             Some(NurbsCurve {
                 degree,
@@ -129,13 +144,19 @@ impl NurbsCurve {
             k += 1;
         }
         // Rational de Boor in homogeneous coordinates.
-        let mut dx: Vec<Vec3> = (0..=p).map(|j| self.control_points[j + k - p] * w(j + k - p)).collect();
+        let mut dx: Vec<Vec3> = (0..=p)
+            .map(|j| self.control_points[j + k - p] * w(j + k - p))
+            .collect();
         let mut dw: Vec<f64> = (0..=p).map(|j| w(j + k - p)).collect();
         for r in 1..=p {
             for j in (r..=p).rev() {
                 let i = j + k - p;
                 let den = knots[i + p - r + 1] - knots[i];
-                let a = if den.abs() < 1e-12 { 0.0 } else { (u - knots[i]) / den };
+                let a = if den.abs() < 1e-12 {
+                    0.0
+                } else {
+                    (u - knots[i]) / den
+                };
                 dx[j] = dx[j - 1] * (1.0 - a) + dx[j] * a;
                 dw[j] = dw[j - 1] * (1.0 - a) + dw[j] * a;
             }
@@ -191,7 +212,11 @@ fn polyline_point(pts: &[Vec3], t: f64) -> Vec3 {
                 i += 1;
             }
             let seg = cum[i + 1] - cum[i];
-            let local = if seg < EPS { 0.0 } else { (target - cum[i]) / seg };
+            let local = if seg < EPS {
+                0.0
+            } else {
+                (target - cum[i]) / seg
+            };
             pts[i].lerp(pts[i + 1], local)
         }
     }
@@ -265,7 +290,12 @@ fn arc_to_nurbs(plane: &Plane, radius: f64, a0: f64, a1: f64) -> NurbsCurve {
         knots.push(v);
     }
     knots.extend_from_slice(&[1.0, 1.0, 1.0]);
-    NurbsCurve { degree: 2, control_points: cps, weights: wts, knots }
+    NurbsCurve {
+        degree: 2,
+        control_points: cps,
+        weights: wts,
+        knots,
+    }
 }
 
 /// True if a linear map is conformal on the given plane (its x/y axes stay
@@ -288,7 +318,11 @@ fn conformal_in_plane(m: &Mat4, plane: &Plane) -> Option<(Vec3, Vec3, f64)> {
 impl Curve {
     /// Point at normalized parameter t in [0,1] (clamped).
     pub fn point_at(&self, t: f64) -> Vec3 {
-        let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         match self {
             Curve::Line { a, b } => a.lerp(*b, t),
             Curve::Polyline { points, closed } => {
@@ -298,7 +332,12 @@ impl Curve {
                 let th = std::f64::consts::TAU * t;
                 plane.point_at(radius * th.cos(), radius * th.sin())
             }
-            Curve::Arc { plane, radius, start_angle, end_angle } => {
+            Curve::Arc {
+                plane,
+                radius,
+                start_angle,
+                end_angle,
+            } => {
                 let th = start_angle + (end_angle - start_angle) * t;
                 plane.point_at(radius * th.cos(), radius * th.sin())
             }
@@ -310,7 +349,11 @@ impl Curve {
     /// line/polyline/circle/arc, central finite differences (h = 1e-5) for
     /// NURBS. Returns Vec3::ZERO for degenerate curves.
     pub fn tangent_at(&self, t: f64) -> Vec3 {
-        let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         match self {
             Curve::Line { a, b } => (*b - *a).normalized(),
             Curve::Polyline { points, closed } => {
@@ -320,7 +363,12 @@ impl Curve {
                 let th = std::f64::consts::TAU * t;
                 ((plane.x_axis * (-th.sin()) + plane.y_axis * th.cos()) * *radius).normalized()
             }
-            Curve::Arc { plane, radius, start_angle, end_angle } => {
+            Curve::Arc {
+                plane,
+                radius,
+                start_angle,
+                end_angle,
+            } => {
                 let sweep = end_angle - start_angle;
                 let th = start_angle + sweep * t;
                 ((plane.x_axis * (-th.sin()) + plane.y_axis * th.cos()) * (*radius * sweep))
@@ -345,9 +393,12 @@ impl Curve {
                 cumulative_lengths(&polyline_effective(points, *closed)).1
             }
             Curve::Circle { radius, .. } => std::f64::consts::TAU * radius.abs(),
-            Curve::Arc { radius, start_angle, end_angle, .. } => {
-                (end_angle - start_angle).abs() * radius.abs()
-            }
+            Curve::Arc {
+                radius,
+                start_angle,
+                end_angle,
+                ..
+            } => (end_angle - start_angle).abs() * radius.abs(),
             Curve::Nurbs(_) => {
                 let n = 256;
                 let mut acc = 0.0;
@@ -376,9 +427,11 @@ impl Curve {
                     })
             }
             Curve::Circle { .. } => true,
-            Curve::Arc { start_angle, end_angle, .. } => {
-                (end_angle - start_angle).abs() >= std::f64::consts::TAU - 1e-9
-            }
+            Curve::Arc {
+                start_angle,
+                end_angle,
+                ..
+            } => (end_angle - start_angle).abs() >= std::f64::consts::TAU - 1e-9,
             Curve::Nurbs(nc) => {
                 let a = nc.point_at(0.0);
                 let b = nc.point_at(1.0);
@@ -398,9 +451,13 @@ impl Curve {
     pub fn tessellate(&self, segments: usize) -> Vec<Vec3> {
         let segs = segments.max(1);
         if self.is_closed() {
-            (0..segs).map(|i| self.point_at(i as f64 / segs as f64)).collect()
+            (0..segs)
+                .map(|i| self.point_at(i as f64 / segs as f64))
+                .collect()
         } else {
-            (0..=segs).map(|i| self.point_at(i as f64 / segs as f64)).collect()
+            (0..=segs)
+                .map(|i| self.point_at(i as f64 / segs as f64))
+                .collect()
         }
     }
 
@@ -422,16 +479,21 @@ impl Curve {
     /// Perspective components of `m` are not supported (affine assumed).
     pub fn transformed(&self, m: &Mat4) -> Curve {
         match self {
-            Curve::Line { a, b } => {
-                Curve::Line { a: m.transform_point(*a), b: m.transform_point(*b) }
-            }
+            Curve::Line { a, b } => Curve::Line {
+                a: m.transform_point(*a),
+                b: m.transform_point(*b),
+            },
             Curve::Polyline { points, closed } => Curve::Polyline {
                 points: points.iter().map(|p| m.transform_point(*p)).collect(),
                 closed: *closed,
             },
             Curve::Circle { plane, radius } => match conformal_in_plane(m, plane) {
                 Some((x_axis, y_axis, s)) => Curve::Circle {
-                    plane: Plane { origin: m.transform_point(plane.origin), x_axis, y_axis },
+                    plane: Plane {
+                        origin: m.transform_point(plane.origin),
+                        x_axis,
+                        y_axis,
+                    },
                     radius: radius * s,
                 },
                 None => {
@@ -439,20 +501,27 @@ impl Curve {
                     Curve::Nurbs(transform_nurbs(&nc, m))
                 }
             },
-            Curve::Arc { plane, radius, start_angle, end_angle } => {
-                match conformal_in_plane(m, plane) {
-                    Some((x_axis, y_axis, s)) => Curve::Arc {
-                        plane: Plane { origin: m.transform_point(plane.origin), x_axis, y_axis },
-                        radius: radius * s,
-                        start_angle: *start_angle,
-                        end_angle: *end_angle,
+            Curve::Arc {
+                plane,
+                radius,
+                start_angle,
+                end_angle,
+            } => match conformal_in_plane(m, plane) {
+                Some((x_axis, y_axis, s)) => Curve::Arc {
+                    plane: Plane {
+                        origin: m.transform_point(plane.origin),
+                        x_axis,
+                        y_axis,
                     },
-                    None => {
-                        let nc = arc_to_nurbs(plane, *radius, *start_angle, *end_angle);
-                        Curve::Nurbs(transform_nurbs(&nc, m))
-                    }
+                    radius: radius * s,
+                    start_angle: *start_angle,
+                    end_angle: *end_angle,
+                },
+                None => {
+                    let nc = arc_to_nurbs(plane, *radius, *start_angle, *end_angle);
+                    Curve::Nurbs(transform_nurbs(&nc, m))
                 }
-            }
+            },
             Curve::Nurbs(nc) => Curve::Nurbs(transform_nurbs(nc, m)),
         }
     }
@@ -492,7 +561,11 @@ impl Curve {
 fn transform_nurbs(nc: &NurbsCurve, m: &Mat4) -> NurbsCurve {
     NurbsCurve {
         degree: nc.degree,
-        control_points: nc.control_points.iter().map(|p| m.transform_point(*p)).collect(),
+        control_points: nc
+            .control_points
+            .iter()
+            .map(|p| m.transform_point(*p))
+            .collect(),
         weights: nc.weights.clone(),
         knots: nc.knots.clone(),
     }
@@ -509,7 +582,12 @@ mod tests {
 
     #[test]
     fn nurbs_from_points_open_endpoints() {
-        let pts = [v(0.0, 0.0, 0.0), v(1.0, 2.0, 0.0), v(3.0, -1.0, 1.0), v(4.0, 0.0, 0.0)];
+        let pts = [
+            v(0.0, 0.0, 0.0),
+            v(1.0, 2.0, 0.0),
+            v(3.0, -1.0, 1.0),
+            v(4.0, 0.0, 0.0),
+        ];
         let nc = NurbsCurve::from_points(&pts, 3, false).unwrap();
         assert_eq!(nc.degree, 3);
         assert_eq!(nc.knots.len(), nc.control_points.len() + nc.degree + 1);
@@ -587,7 +665,10 @@ mod tests {
 
     #[test]
     fn line_eval() {
-        let c = Curve::Line { a: v(1.0, 0.0, 0.0), b: v(3.0, 0.0, 0.0) };
+        let c = Curve::Line {
+            a: v(1.0, 0.0, 0.0),
+            b: v(3.0, 0.0, 0.0),
+        };
         assert!(c.point_at(0.5).distance(v(2.0, 0.0, 0.0)) < 1e-12);
         assert!(c.tangent_at(0.3).distance(Vec3::X) < 1e-12);
         assert!((c.length() - 2.0).abs() < 1e-12);
@@ -612,36 +693,59 @@ mod tests {
 
     #[test]
     fn polyline_closed_semantics() {
-        let sq = vec![v(0.0, 0.0, 0.0), v(1.0, 0.0, 0.0), v(1.0, 1.0, 0.0), v(0.0, 1.0, 0.0)];
-        let c = Curve::Polyline { points: sq.clone(), closed: true };
+        let sq = vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(1.0, 1.0, 0.0),
+            v(0.0, 1.0, 0.0),
+        ];
+        let c = Curve::Polyline {
+            points: sq.clone(),
+            closed: true,
+        };
         assert!(c.is_closed());
         assert!((c.length() - 4.0).abs() < 1e-12);
         assert!(c.point_at(1.0).distance(v(0.0, 0.0, 0.0)) < 1e-12);
         // Unflagged but first == last also reads as closed.
         let mut loopy = sq.clone();
         loopy.push(sq[0]);
-        let c2 = Curve::Polyline { points: loopy, closed: false };
+        let c2 = Curve::Polyline {
+            points: loopy,
+            closed: false,
+        };
         assert!(c2.is_closed());
         assert!((c2.length() - 4.0).abs() < 1e-12);
         // Open square is open.
-        let c3 = Curve::Polyline { points: sq, closed: false };
+        let c3 = Curve::Polyline {
+            points: sq,
+            closed: false,
+        };
         assert!(!c3.is_closed());
         assert!((c3.length() - 3.0).abs() < 1e-12);
     }
 
     #[test]
     fn polyline_degenerate_no_panic() {
-        let c = Curve::Polyline { points: vec![], closed: true };
+        let c = Curve::Polyline {
+            points: vec![],
+            closed: true,
+        };
         assert_eq!(c.point_at(0.5), Vec3::ZERO);
         assert_eq!(c.length(), 0.0);
-        let c = Curve::Polyline { points: vec![v(1.0, 1.0, 1.0); 4], closed: true };
+        let c = Curve::Polyline {
+            points: vec![v(1.0, 1.0, 1.0); 4],
+            closed: true,
+        };
         assert!(c.point_at(0.7).distance(v(1.0, 1.0, 1.0)) < 1e-12);
         assert_eq!(c.tangent_at(0.5), Vec3::ZERO);
     }
 
     #[test]
     fn circle_eval_exact() {
-        let c = Curve::Circle { plane: Plane::world_xy(), radius: 2.0 };
+        let c = Curve::Circle {
+            plane: Plane::world_xy(),
+            radius: 2.0,
+        };
         assert!(c.is_closed());
         assert!((c.length() - TAU * 2.0).abs() < 1e-12);
         assert!(c.point_at(0.25).distance(v(0.0, 2.0, 0.0)) < 1e-12);
@@ -679,7 +783,10 @@ mod tests {
 
     #[test]
     fn tessellate_seam_rules() {
-        let circle = Curve::Circle { plane: Plane::world_xy(), radius: 1.0 };
+        let circle = Curve::Circle {
+            plane: Plane::world_xy(),
+            radius: 1.0,
+        };
         let pts = circle.tessellate(8);
         assert_eq!(pts.len(), 8); // closed: no seam duplicate
         for p in &pts {
@@ -687,7 +794,10 @@ mod tests {
         }
         assert!(pts[0].distance(pts[7]) > 1e-6);
 
-        let line = Curve::Line { a: Vec3::ZERO, b: Vec3::X };
+        let line = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::X,
+        };
         assert_eq!(line.tessellate(8).len(), 9); // open: segments+1
         assert_eq!(line.tessellate(0).len(), 2); // clamped to >= 1 segment
 
@@ -706,9 +816,15 @@ mod tests {
 
     #[test]
     fn divide_counts() {
-        let circle = Curve::Circle { plane: Plane::world_xy(), radius: 1.0 };
+        let circle = Curve::Circle {
+            plane: Plane::world_xy(),
+            radius: 1.0,
+        };
         assert_eq!(circle.divide(6).len(), 6);
-        let line = Curve::Line { a: Vec3::ZERO, b: Vec3::X };
+        let line = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::X,
+        };
         assert_eq!(line.divide(6).len(), 7);
         assert!(line.divide(0).is_empty());
         // Evenly spaced by parameter.
@@ -718,7 +834,10 @@ mod tests {
 
     #[test]
     fn transform_circle_rigid_stays_circle() {
-        let c = Curve::Circle { plane: Plane::world_xy(), radius: 1.5 };
+        let c = Curve::Circle {
+            plane: Plane::world_xy(),
+            radius: 1.5,
+        };
         let m = Mat4::translation(v(1.0, 2.0, 3.0))
             * Mat4::rotation_axis(Vec3::ZERO, v(1.0, 1.0, 0.0), 0.7);
         match c.transformed(&m) {
@@ -738,7 +857,10 @@ mod tests {
 
     #[test]
     fn transform_circle_nonuniform_becomes_exact_ellipse() {
-        let c = Curve::Circle { plane: Plane::world_xy(), radius: 1.0 };
+        let c = Curve::Circle {
+            plane: Plane::world_xy(),
+            radius: 1.0,
+        };
         let m = Mat4::scaling(v(3.0, 1.0, 1.0));
         let e = c.transformed(&m);
         match &e {
@@ -749,7 +871,12 @@ mod tests {
         for i in 0..=64 {
             let p = e.point_at(i as f64 / 64.0);
             let val = (p.x / 3.0).powi(2) + p.y * p.y;
-            assert!((val - 1.0).abs() < 1e-9, "ellipse deviation {} at {}", val, i);
+            assert!(
+                (val - 1.0).abs() < 1e-9,
+                "ellipse deviation {} at {}",
+                val,
+                i
+            );
         }
         assert!(e.is_closed());
     }

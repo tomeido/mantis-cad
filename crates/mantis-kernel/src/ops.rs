@@ -15,13 +15,17 @@ use crate::mesh::Mesh;
 fn profile_points(curve: &Curve, segments: usize) -> (Vec<Vec3>, bool) {
     let closed = curve.is_closed();
     if let Curve::Line { a, b } = curve {
-        return if a.distance(*b) > EPS { (vec![*a, *b], false) } else { (vec![*a], false) };
+        return if a.distance(*b) > EPS {
+            (vec![*a, *b], false)
+        } else {
+            (vec![*a], false)
+        };
     }
     if let Curve::Polyline { points, .. } = curve {
         // Drop consecutive duplicates (and the seam duplicate when closed).
         let mut pts: Vec<Vec3> = Vec::with_capacity(points.len());
         for p in points {
-            if pts.last().map_or(true, |q| q.distance(*p) > EPS) {
+            if pts.last().is_none_or(|q| q.distance(*p) > EPS) {
                 pts.push(*p);
             }
         }
@@ -90,9 +94,7 @@ fn ear_clip(pts: &[Vec3]) -> Vec<[usize; 3]> {
         idx.reverse(); // clip as CCW; emitted triangles stay CCW in projection
     }
     let inside = |a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]| -> bool {
-        cross2(a, b, p) >= -eps_area
-            && cross2(b, c, p) >= -eps_area
-            && cross2(c, a, p) >= -eps_area
+        cross2(a, b, p) >= -eps_area && cross2(b, c, p) >= -eps_area && cross2(c, a, p) >= -eps_area
     };
     let mut tris = Vec::with_capacity(pts.len().saturating_sub(2));
     while idx.len() > 3 {
@@ -156,7 +158,11 @@ pub fn extrude(curve: &Curve, dir: Vec3, segments: usize) -> Mesh {
     if pts.len() < 2 || (closed && pts.len() < 3) {
         return Mesh::new();
     }
-    let nn = if closed { newell_normal(&pts) } else { Vec3::ZERO };
+    let nn = if closed {
+        newell_normal(&pts)
+    } else {
+        Vec3::ZERO
+    };
     if closed && nn.dot(dir) < 0.0 {
         pts.reverse(); // make the profile CCW as seen along +dir
     }
@@ -179,11 +185,8 @@ pub fn extrude(curve: &Curve, dir: Vec3, segments: usize) -> Mesh {
         // which points along +dir: use directly for the top, flipped for the
         // bottom, so both face outward.
         for t in &tris {
-            mesh.indices.push([
-                (n + t[0]) as u32,
-                (n + t[1]) as u32,
-                (n + t[2]) as u32,
-            ]);
+            mesh.indices
+                .push([(n + t[0]) as u32, (n + t[1]) as u32, (n + t[2]) as u32]);
             mesh.indices.push([t[0] as u32, t[2] as u32, t[1] as u32]);
         }
     }
@@ -216,13 +219,18 @@ pub fn revolve(
         return Mesh::new();
     }
     let full = (angle.abs() - std::f64::consts::TAU).abs() < 1e-7;
-    let steps = if full { segments.max(3) } else { segments.max(1) };
+    let steps = if full {
+        segments.max(3)
+    } else {
+        segments.max(1)
+    };
     let rows = if full { steps } else { steps + 1 };
     let n = pts.len();
     let mut mesh = Mesh::new();
     for s in 0..rows {
         let m = Mat4::rotation_axis(axis_origin, axis_dir, angle * s as f64 / steps as f64);
-        mesh.positions.extend(pts.iter().map(|p| m.transform_point(*p)));
+        mesh.positions
+            .extend(pts.iter().map(|p| m.transform_point(*p)));
     }
     let row_quads = if full { rows } else { rows - 1 };
     let col_quads = if profile_closed { n } else { n - 1 };
@@ -249,7 +257,10 @@ pub fn revolve(
 /// seam point duplicated to match). Errors if fewer than 2 sections.
 pub fn loft(sections: &[Curve], segments_per_section: usize) -> Result<Mesh, String> {
     if sections.len() < 2 {
-        return Err(format!("loft needs at least 2 sections, got {}", sections.len()));
+        return Err(format!(
+            "loft needs at least 2 sections, got {}",
+            sections.len()
+        ));
     }
     let segs = segments_per_section.max(1);
     let all_closed = sections.iter().all(|s| s.is_closed());
@@ -294,7 +305,7 @@ pub fn loft(sections: &[Curve], segments_per_section: usize) -> Result<Mesh, Str
 /// so the seam does not twist; open rails get flat end caps. Degenerate
 /// rails (zero length) or non-positive radius give an empty mesh.
 pub fn pipe(rail: &Curve, radius: f64, rail_segments: usize, ring_segments: usize) -> Mesh {
-    if !(radius > EPS) {
+    if !radius.is_finite() || radius <= EPS {
         return Mesh::new();
     }
     let closed = rail.is_closed();
@@ -325,7 +336,11 @@ pub fn pipe(rail: &Curve, radius: f64, rail_segments: usize, ring_segments: usiz
             return n_prev;
         }
         let ang = s.min(1.0).asin().max(0.0);
-        let ang = if t_prev.dot(t_new) < 0.0 { std::f64::consts::PI - ang } else { ang };
+        let ang = if t_prev.dot(t_new) < 0.0 {
+            std::f64::consts::PI - ang
+        } else {
+            ang
+        };
         let rot = Mat4::rotation_axis(Vec3::ZERO, axis, ang);
         rot.transform_vector(n_prev)
     };
@@ -381,7 +396,8 @@ pub fn pipe(rail: &Curve, radius: f64, rail_segments: usize, ring_segments: usiz
         let b_i = t_i.cross(n_i).normalized();
         for k in 0..ring_n {
             let phi = std::f64::consts::TAU * k as f64 / ring_n as f64;
-            mesh.positions.push(pts[i] + (n_i * phi.cos() + b_i * phi.sin()) * radius);
+            mesh.positions
+                .push(pts[i] + (n_i * phi.cos() + b_i * phi.sin()) * radius);
         }
     }
     let ring_rows = if closed { m } else { m - 1 };
@@ -433,7 +449,10 @@ pub fn planar_surface(boundary: &Curve, segments: usize) -> Result<Mesh, String>
     }
     let mut mesh = Mesh::new();
     mesh.positions = pts;
-    mesh.indices = tris.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+    mesh.indices = tris
+        .iter()
+        .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
+        .collect();
     mesh.recompute_normals();
     Ok(mesh)
 }
@@ -445,7 +464,10 @@ mod tests {
     use std::f64::consts::{PI, TAU};
 
     fn unit_circle(r: f64) -> Curve {
-        Curve::Circle { plane: Plane::world_xy(), radius: r }
+        Curve::Circle {
+            plane: Plane::world_xy(),
+            radius: r,
+        }
     }
 
     fn rect(w: f64, h: f64) -> Curve {
@@ -480,7 +502,11 @@ mod tests {
         let m = extrude(&unit_circle(1.0), Vec3::Z * 2.0, 64);
         let exact = PI * 2.0;
         assert!(m.volume() > 0.0);
-        assert!((m.volume() - exact).abs() / exact < 0.02, "vol {}", m.volume());
+        assert!(
+            (m.volume() - exact).abs() / exact < 0.02,
+            "vol {}",
+            m.volume()
+        );
         // Lateral + 2 caps.
         let exact_a = TAU * 2.0 + 2.0 * PI;
         assert!((m.area() - exact_a).abs() / exact_a < 0.02);
@@ -508,7 +534,10 @@ mod tests {
 
     #[test]
     fn extrude_open_curve_is_uncapped_wall() {
-        let line = Curve::Line { a: Vec3::ZERO, b: Vec3::X * 3.0 };
+        let line = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::X * 3.0,
+        };
         let m = extrude(&line, Vec3::Z * 2.0, 1);
         assert!((m.area() - 6.0).abs() < 1e-9);
         assert!(m.volume().abs() < 1e-9);
@@ -517,9 +546,15 @@ mod tests {
     #[test]
     fn extrude_degenerate_inputs_empty() {
         assert_eq!(extrude(&unit_circle(1.0), Vec3::ZERO, 32).vertex_count(), 0);
-        let pt = Curve::Polyline { points: vec![Vec3::ZERO], closed: false };
+        let pt = Curve::Polyline {
+            points: vec![Vec3::ZERO],
+            closed: false,
+        };
         assert_eq!(extrude(&pt, Vec3::Z, 8).vertex_count(), 0);
-        let two = Curve::Polyline { points: vec![Vec3::ZERO, Vec3::X, Vec3::ZERO], closed: true };
+        let two = Curve::Polyline {
+            points: vec![Vec3::ZERO, Vec3::X, Vec3::ZERO],
+            closed: true,
+        };
         assert_eq!(extrude(&two, Vec3::Z, 8).vertex_count(), 0);
     }
 
@@ -538,14 +573,21 @@ mod tests {
         let m = revolve(&profile, Vec3::ZERO, Vec3::Z, TAU, 64);
         let exact = 2.0 * PI * PI * 3.0;
         assert!(m.volume() > 0.0, "vol {}", m.volume());
-        assert!((m.volume() - exact).abs() / exact < 0.04, "vol {}", m.volume());
+        assert!(
+            (m.volume() - exact).abs() / exact < 0.04,
+            "vol {}",
+            m.volume()
+        );
         // Full turn welds the seam: rows * profile points, no extra row.
         assert_eq!(m.vertex_count(), 64 * 32);
     }
 
     #[test]
     fn revolve_partial_open() {
-        let profile = Curve::Line { a: Vec3::new(1.0, 0.0, 0.0), b: Vec3::new(1.0, 0.0, 2.0) };
+        let profile = Curve::Line {
+            a: Vec3::new(1.0, 0.0, 0.0),
+            b: Vec3::new(1.0, 0.0, 2.0),
+        };
         let m = revolve(&profile, Vec3::ZERO, Vec3::Z, PI, 32);
         // Half a cylinder shell of radius 1, height 2: area = π * 1 * 2 * ... = 2π.
         let exact = PI * 2.0;
@@ -555,15 +597,27 @@ mod tests {
 
     #[test]
     fn revolve_degenerate_empty() {
-        let profile = Curve::Line { a: Vec3::X, b: Vec3::X * 2.0 };
-        assert_eq!(revolve(&profile, Vec3::ZERO, Vec3::ZERO, TAU, 16).vertex_count(), 0);
-        assert_eq!(revolve(&profile, Vec3::ZERO, Vec3::Z, 0.0, 16).vertex_count(), 0);
+        let profile = Curve::Line {
+            a: Vec3::X,
+            b: Vec3::X * 2.0,
+        };
+        assert_eq!(
+            revolve(&profile, Vec3::ZERO, Vec3::ZERO, TAU, 16).vertex_count(),
+            0
+        );
+        assert_eq!(
+            revolve(&profile, Vec3::ZERO, Vec3::Z, 0.0, 16).vertex_count(),
+            0
+        );
     }
 
     #[test]
     fn loft_two_circles_is_cylinder_side() {
         let bottom = unit_circle(1.0);
-        let top = Curve::Circle { plane: Plane::world_xy_at(Vec3::Z * 3.0), radius: 1.0 };
+        let top = Curve::Circle {
+            plane: Plane::world_xy_at(Vec3::Z * 3.0),
+            radius: 1.0,
+        };
         let m = loft(&[bottom, top], 64).unwrap();
         let exact = TAU * 3.0; // lateral area 2π r h
         assert!((m.area() - exact).abs() / exact < 0.01, "area {}", m.area());
@@ -574,7 +628,10 @@ mod tests {
     #[test]
     fn loft_capped_by_planar_surfaces_matches_cylinder_volume() {
         let bottom = unit_circle(1.0);
-        let top = Curve::Circle { plane: Plane::world_xy_at(Vec3::Z * 3.0), radius: 1.0 };
+        let top = Curve::Circle {
+            plane: Plane::world_xy_at(Vec3::Z * 3.0),
+            radius: 1.0,
+        };
         let mut m = loft(&[bottom.clone(), top.clone()], 64).unwrap();
         // Cap it: bottom disc flipped (normal -Z), top disc as-is (+Z).
         let mut bot_cap = planar_surface(&bottom, 64).unwrap();
@@ -585,7 +642,11 @@ mod tests {
         m.append(&bot_cap);
         m.append(&top_cap);
         let exact = PI * 3.0;
-        assert!((m.volume() - exact).abs() / exact < 0.01, "vol {}", m.volume());
+        assert!(
+            (m.volume() - exact).abs() / exact < 0.01,
+            "vol {}",
+            m.volume()
+        );
     }
 
     #[test]
@@ -596,8 +657,14 @@ mod tests {
 
     #[test]
     fn loft_mixed_open_closed_counts_match() {
-        let open = Curve::Line { a: Vec3::ZERO, b: Vec3::X };
-        let closed = Curve::Circle { plane: Plane::world_xy_at(Vec3::Z), radius: 0.5 };
+        let open = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::X,
+        };
+        let closed = Curve::Circle {
+            plane: Plane::world_xy_at(Vec3::Z),
+            radius: 0.5,
+        };
         let m = loft(&[open, closed], 12).unwrap();
         assert_eq!(m.vertex_count(), 2 * 13);
         assert!(m.triangle_count() > 0);
@@ -605,11 +672,18 @@ mod tests {
 
     #[test]
     fn pipe_straight_rail_is_cylinder() {
-        let rail = Curve::Line { a: Vec3::ZERO, b: Vec3::Z * 5.0 };
+        let rail = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::Z * 5.0,
+        };
         let m = pipe(&rail, 0.5, 8, 48);
         let exact = PI * 0.25 * 5.0;
         assert!(m.volume() > 0.0);
-        assert!((m.volume() - exact).abs() / exact < 0.01, "vol {}", m.volume());
+        assert!(
+            (m.volume() - exact).abs() / exact < 0.01,
+            "vol {}",
+            m.volume()
+        );
     }
 
     #[test]
@@ -617,16 +691,26 @@ mod tests {
         let rail = unit_circle(3.0);
         let m = pipe(&rail, 1.0, 96, 32);
         let exact = 2.0 * PI * PI * 3.0;
-        assert!((m.volume().abs() - exact).abs() / exact < 0.04, "vol {}", m.volume());
+        assert!(
+            (m.volume().abs() - exact).abs() / exact < 0.04,
+            "vol {}",
+            m.volume()
+        );
         // Welded: rails*rings vertices, no caps.
         assert_eq!(m.vertex_count(), 96 * 32);
     }
 
     #[test]
     fn pipe_degenerate_empty() {
-        let rail = Curve::Line { a: Vec3::ZERO, b: Vec3::ZERO };
+        let rail = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::ZERO,
+        };
         assert_eq!(pipe(&rail, 0.5, 8, 8).vertex_count(), 0);
-        let rail = Curve::Line { a: Vec3::ZERO, b: Vec3::Z };
+        let rail = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::Z,
+        };
         assert_eq!(pipe(&rail, 0.0, 8, 8).vertex_count(), 0);
         assert_eq!(pipe(&rail, -1.0, 8, 8).vertex_count(), 0);
     }
@@ -645,8 +729,8 @@ mod tests {
         let m = planar_surface(&l_shape(), 16).unwrap();
         assert!((m.area() - 3.0).abs() < 1e-9, "area {}", m.area());
         assert_eq!(m.triangle_count(), 4); // n-2 triangles for n=6
-        // All triangles must lie inside the L (concavity respected):
-        // centroid of each triangle is inside the polygon.
+                                           // All triangles must lie inside the L (concavity respected):
+                                           // centroid of each triangle is inside the polygon.
         for t in &m.indices {
             let c = (m.positions[t[0] as usize]
                 + m.positions[t[1] as usize]
@@ -677,7 +761,10 @@ mod tests {
 
     #[test]
     fn planar_surface_errors() {
-        let open = Curve::Line { a: Vec3::ZERO, b: Vec3::X };
+        let open = Curve::Line {
+            a: Vec3::ZERO,
+            b: Vec3::X,
+        };
         assert!(planar_surface(&open, 8).is_err());
         // Closed but zero-area (back-and-forth) polyline.
         let flat = Curve::Polyline {
@@ -708,10 +795,24 @@ mod tests {
     fn all_ops_have_normals() {
         let m = extrude(&unit_circle(1.0), Vec3::Z, 16);
         assert_eq!(m.normals.len(), m.positions.len());
-        let m = pipe(&Curve::Line { a: Vec3::ZERO, b: Vec3::Z }, 0.3, 4, 8);
+        let m = pipe(
+            &Curve::Line {
+                a: Vec3::ZERO,
+                b: Vec3::Z,
+            },
+            0.3,
+            4,
+            8,
+        );
         assert_eq!(m.normals.len(), m.positions.len());
         let m = loft(
-            &[unit_circle(1.0), Curve::Circle { plane: Plane::world_xy_at(Vec3::Z), radius: 1.0 }],
+            &[
+                unit_circle(1.0),
+                Curve::Circle {
+                    plane: Plane::world_xy_at(Vec3::Z),
+                    radius: 1.0,
+                },
+            ],
             16,
         )
         .unwrap();

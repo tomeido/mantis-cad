@@ -40,7 +40,10 @@ fn append_rejects_nonfinite_pos() {
             &id,
             1,
         );
-        assert!(matches!(r, Err(ChainError::NonFinite { .. })), "pos {bad} -> {r:?}");
+        assert!(
+            matches!(r, Err(ChainError::NonFinite { .. })),
+            "pos {bad} -> {r:?}"
+        );
     }
 }
 

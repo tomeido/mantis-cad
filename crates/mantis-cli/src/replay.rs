@@ -55,7 +55,9 @@ pub fn replay_report(chain: &Chain, upto: Option<usize>) -> Result<ReplayReport,
 
     let mut node_lines = Vec::with_capacity(graph.nodes.len());
     for id in graph.topo_order() {
-        let Some(node) = graph.nodes.get(&id) else { continue };
+        let Some(node) = graph.nodes.get(&id) else {
+            continue;
+        };
         let line = match (out.errors.get(&id), out.outputs.get(&id)) {
             (Some(err), _) => format!("{id}  {:<18} ERROR: {err}", node.type_name),
             (None, Some(vals)) => {

@@ -14,7 +14,9 @@ fn params() -> BTreeMap<String, ParamValue> {
 
 fn eval(type_name: &str, inputs: &[Value]) -> Result<Vec<Value>, String> {
     let reg = Registry::standard();
-    let c = reg.get(type_name).unwrap_or_else(|| panic!("missing component {type_name}"));
+    let c = reg
+        .get(type_name)
+        .unwrap_or_else(|| panic!("missing component {type_name}"));
     c.eval(inputs, &params())
 }
 
@@ -32,33 +34,85 @@ fn approx_vec(a: Vec3, b: Vec3) {
 
 const FROZEN_TYPE_NAMES: &[&str] = &[
     // Params
-    "number_slider", "bool_toggle", "panel", "point_xyz", "pi_const",
+    "number_slider",
+    "bool_toggle",
+    "panel",
+    "point_xyz",
+    "pi_const",
     // Maths
-    "add", "subtract", "multiply", "divide", "power", "modulo", "negate",
-    "sin", "cos", "sqrt", "abs", "min", "max", "remap",
+    "add",
+    "subtract",
+    "multiply",
+    "divide",
+    "power",
+    "modulo",
+    "negate",
+    "sin",
+    "cos",
+    "sqrt",
+    "abs",
+    "min",
+    "max",
+    "remap",
     // Sets
-    "series", "range", "list_item", "list_length", "repeat",
+    "series",
+    "range",
+    "list_item",
+    "list_length",
+    "repeat",
     // Vector
-    "vector_xyz", "deconstruct_vector", "unit_x", "unit_y", "unit_z",
-    "distance", "dot", "cross", "amplitude", "rotate_vector",
-    "xy_plane", "plane_normal",
+    "vector_xyz",
+    "deconstruct_vector",
+    "unit_x",
+    "unit_y",
+    "unit_z",
+    "distance",
+    "dot",
+    "cross",
+    "amplitude",
+    "rotate_vector",
+    "xy_plane",
+    "plane_normal",
     // Curve
-    "line", "polyline", "circle", "arc", "nurbs_curve", "divide_curve",
-    "eval_curve", "curve_length",
+    "line",
+    "polyline",
+    "circle",
+    "arc",
+    "nurbs_curve",
+    "divide_curve",
+    "eval_curve",
+    "curve_length",
     // Surface
-    "extrude", "revolve", "loft", "pipe", "planar_srf", "box_mesh",
-    "sphere", "cylinder", "cone", "torus",
+    "extrude",
+    "revolve",
+    "loft",
+    "pipe",
+    "planar_srf",
+    "box_mesh",
+    "sphere",
+    "cylinder",
+    "cone",
+    "torus",
     // Transform
-    "move", "rotate", "scale", "mirror",
+    "move",
+    "rotate",
+    "scale",
+    "mirror",
     // Analysis
-    "bbox", "area", "volume", "mesh_info", "data_size",
+    "bbox",
+    "area",
+    "volume",
+    "mesh_info",
+    "data_size",
 ];
 
 #[test]
 fn registry_contains_all_frozen_type_names() {
     let reg = Registry::standard();
     for name in FROZEN_TYPE_NAMES {
-        let c = reg.get(name).unwrap_or_else(|| panic!("missing component {name}"));
+        let c = reg
+            .get(name)
+            .unwrap_or_else(|| panic!("missing component {name}"));
         assert_eq!(c.type_name(), *name);
         assert!(!c.label().is_empty());
         assert!(!c.category().is_empty());
@@ -99,7 +153,10 @@ fn bool_toggle_and_pi() {
         reg.get("bool_toggle").unwrap().eval(&[], &p).unwrap(),
         vec![Value::Bool(true)]
     );
-    approx(num(&eval("pi_const", &[]).unwrap()[0]), std::f64::consts::PI);
+    approx(
+        num(&eval("pi_const", &[]).unwrap()[0]),
+        std::f64::consts::PI,
+    );
 }
 
 #[test]
@@ -139,7 +196,9 @@ fn maths_polymorphic() {
 #[test]
 fn maths_edge_cases() {
     let n = |x: f64| Value::Number(x);
-    assert!(eval("divide", &[n(1.0), n(0.0)]).unwrap_err().contains("zero"));
+    assert!(eval("divide", &[n(1.0), n(0.0)])
+        .unwrap_err()
+        .contains("zero"));
     assert_eq!(eval("divide", &[n(9.0), n(3.0)]).unwrap(), vec![n(3.0)]);
     assert!(eval("modulo", &[n(1.0), n(0.0)]).is_err());
     // Floored modulo: -1 mod 3 == 2.
@@ -151,7 +210,10 @@ fn maths_edge_cases() {
     assert_eq!(eval("min", &[n(1.0), n(2.0)]).unwrap(), vec![n(1.0)]);
     assert_eq!(eval("max", &[n(1.0), n(2.0)]).unwrap(), vec![n(2.0)]);
     assert_eq!(eval("power", &[n(2.0), n(10.0)]).unwrap(), vec![n(1024.0)]);
-    approx(num(&eval("sin", &[n(std::f64::consts::FRAC_PI_2)]).unwrap()[0]), 1.0);
+    approx(
+        num(&eval("sin", &[n(std::f64::consts::FRAC_PI_2)]).unwrap()[0]),
+        1.0,
+    );
     approx(num(&eval("cos", &[n(0.0)]).unwrap()[0]), 1.0);
 }
 
@@ -168,12 +230,12 @@ fn remap_maps_domains() {
 fn series_range_repeat() {
     let n = |x: f64| Value::Number(x);
     let out = eval("series", &[n(2.0), n(3.0), n(4.0)]).unwrap();
-    assert_eq!(
-        out[0],
-        Value::List(vec![n(2.0), n(5.0), n(8.0), n(11.0)])
-    );
+    assert_eq!(out[0], Value::List(vec![n(2.0), n(5.0), n(8.0), n(11.0)]));
     // Negative count clamps to empty.
-    assert_eq!(eval("series", &[n(0.0), n(1.0), n(-5.0)]).unwrap()[0], Value::List(vec![]));
+    assert_eq!(
+        eval("series", &[n(0.0), n(1.0), n(-5.0)]).unwrap()[0],
+        Value::List(vec![])
+    );
     // Excessive count errors instead of allocating gigabytes.
     assert!(eval("series", &[n(0.0), n(1.0), n(1e12)]).is_err());
 
@@ -184,10 +246,7 @@ fn series_range_repeat() {
     );
 
     let out = eval("repeat", &[Value::Bool(true), n(3.0)]).unwrap();
-    assert_eq!(
-        out[0],
-        Value::List(vec![Value::Bool(true); 3])
-    );
+    assert_eq!(out[0], Value::List(vec![Value::Bool(true); 3]));
 }
 
 #[test]
@@ -209,7 +268,11 @@ fn list_item_and_length() {
     );
     // out of range without wrap errors
     assert!(eval("list_item", &[l.clone(), n(5.0), Value::Bool(false)]).is_err());
-    assert!(eval("list_item", &[Value::List(vec![]), n(0.0), Value::Bool(true)]).is_err());
+    assert!(eval(
+        "list_item",
+        &[Value::List(vec![]), n(0.0), Value::Bool(true)]
+    )
+    .is_err());
     assert_eq!(eval("list_length", &[l]).unwrap(), vec![n(3.0)]);
 }
 
@@ -219,12 +282,25 @@ fn vector_components() {
     let out = eval("vector_xyz", &[n(1.0), n(2.0), n(3.0)]).unwrap();
     assert_eq!(out, vec![Value::Vector(Vec3::new(1.0, 2.0, 3.0))]);
 
-    let out = eval("deconstruct_vector", &[Value::Vector(Vec3::new(1.0, 2.0, 3.0))]).unwrap();
+    let out = eval(
+        "deconstruct_vector",
+        &[Value::Vector(Vec3::new(1.0, 2.0, 3.0))],
+    )
+    .unwrap();
     assert_eq!(out, vec![n(1.0), n(2.0), n(3.0)]);
 
-    assert_eq!(eval("unit_x", &[n(2.0)]).unwrap(), vec![Value::Vector(Vec3::new(2.0, 0.0, 0.0))]);
-    assert_eq!(eval("unit_y", &[n(1.0)]).unwrap(), vec![Value::Vector(Vec3::Y)]);
-    assert_eq!(eval("unit_z", &[n(1.0)]).unwrap(), vec![Value::Vector(Vec3::Z)]);
+    assert_eq!(
+        eval("unit_x", &[n(2.0)]).unwrap(),
+        vec![Value::Vector(Vec3::new(2.0, 0.0, 0.0))]
+    );
+    assert_eq!(
+        eval("unit_y", &[n(1.0)]).unwrap(),
+        vec![Value::Vector(Vec3::Y)]
+    );
+    assert_eq!(
+        eval("unit_z", &[n(1.0)]).unwrap(),
+        vec![Value::Vector(Vec3::Z)]
+    );
 
     let a = Value::Vector(Vec3::new(0.0, 0.0, 0.0));
     let b = Value::Vector(Vec3::new(3.0, 4.0, 0.0));
@@ -236,7 +312,11 @@ fn vector_components() {
     let out = eval("cross", &[x, y]).unwrap();
     approx_vec(out[0].as_vector().unwrap(), Vec3::Z);
 
-    let out = eval("amplitude", &[Value::Vector(Vec3::new(0.0, 3.0, 0.0)), n(2.0)]).unwrap();
+    let out = eval(
+        "amplitude",
+        &[Value::Vector(Vec3::new(0.0, 3.0, 0.0)), n(2.0)],
+    )
+    .unwrap();
     approx_vec(out[0].as_vector().unwrap(), Vec3::new(0.0, 2.0, 0.0));
     assert!(eval("amplitude", &[Value::Vector(Vec3::ZERO), n(2.0)]).is_err());
 }
@@ -302,7 +382,10 @@ fn curve_constructors_are_pure_data() {
     // Too few points errors.
     assert!(eval(
         "polyline",
-        &[Value::List(vec![Value::Vector(Vec3::ZERO)]), Value::Bool(false)]
+        &[
+            Value::List(vec![Value::Vector(Vec3::ZERO)]),
+            Value::Bool(false)
+        ]
     )
     .is_err());
     // Non-vector element errors with an indexed port name.
@@ -317,7 +400,11 @@ fn curve_constructors_are_pure_data() {
     assert!(err.contains("points[1]"), "{err}");
 
     // circle accepts a bare point as its plane (Value::as_plane convenience).
-    let out = eval("circle", &[Value::Vector(Vec3::new(0.0, 0.0, 2.0)), Value::Number(3.0)]).unwrap();
+    let out = eval(
+        "circle",
+        &[Value::Vector(Vec3::new(0.0, 0.0, 2.0)), Value::Number(3.0)],
+    )
+    .unwrap();
     match &*out[0].as_curve().unwrap() {
         Curve::Circle { plane, radius } => {
             assert_eq!(*radius, 3.0);
@@ -325,7 +412,11 @@ fn curve_constructors_are_pure_data() {
         }
         other => panic!("expected circle, got {other:?}"),
     }
-    assert!(eval("circle", &[Value::Plane(Plane::world_xy()), Value::Number(0.0)]).is_err());
+    assert!(eval(
+        "circle",
+        &[Value::Plane(Plane::world_xy()), Value::Number(0.0)]
+    )
+    .is_err());
 
     let out = eval(
         "arc",
@@ -343,7 +434,11 @@ fn curve_constructors_are_pure_data() {
 #[test]
 fn transforms_on_points_and_planes() {
     let p = Value::Vector(Vec3::new(1.0, 2.0, 3.0));
-    let out = eval("move", &[p.clone(), Value::Vector(Vec3::new(1.0, 0.0, 0.0))]).unwrap();
+    let out = eval(
+        "move",
+        &[p.clone(), Value::Vector(Vec3::new(1.0, 0.0, 0.0))],
+    )
+    .unwrap();
     approx_vec(out[0].as_vector().unwrap(), Vec3::new(2.0, 2.0, 3.0));
 
     let out = eval(
@@ -382,7 +477,11 @@ fn transforms_on_points_and_planes() {
     }
 
     // Non-geometry input errors.
-    assert!(eval("move", &[Value::Text("hi".into()), Value::Vector(Vec3::ZERO)]).is_err());
+    assert!(eval(
+        "move",
+        &[Value::Text("hi".into()), Value::Vector(Vec3::ZERO)]
+    )
+    .is_err());
 }
 
 fn test_mesh() -> Mesh {

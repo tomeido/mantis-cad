@@ -44,6 +44,8 @@ use crate::value::{ParamValue, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+type EvalFn = fn(&[Value], &BTreeMap<String, ParamValue>) -> Result<Vec<Value>, String>;
+
 /// A built-in component described by plain (capture-free) function pointers —
 /// keeps the library table-driven without macros; trivially `Send + Sync`.
 pub(crate) struct FnComponent {
@@ -52,7 +54,7 @@ pub(crate) struct FnComponent {
     pub(crate) category: &'static str,
     pub(crate) inputs: fn() -> Vec<PortSpec>,
     pub(crate) outputs: fn() -> Vec<PortSpec>,
-    pub(crate) eval: fn(&[Value], &BTreeMap<String, ParamValue>) -> Result<Vec<Value>, String>,
+    pub(crate) eval: EvalFn,
 }
 
 impl Component for FnComponent {

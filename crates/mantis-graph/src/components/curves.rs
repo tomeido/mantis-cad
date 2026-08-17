@@ -69,7 +69,10 @@ pub(crate) fn all() -> Vec<Arc<dyn Component>> {
             eval: |inputs, _| {
                 let plane = util::plane(inputs, 0, "plane")?;
                 let radius = util::positive(inputs, 1, "radius")?;
-                Ok(vec![Value::Curve(Arc::new(Curve::Circle { plane, radius }))])
+                Ok(vec![Value::Curve(Arc::new(Curve::Circle {
+                    plane,
+                    radius,
+                }))])
             },
         }),
         // Angles in radians, measured in-plane from x_axis toward y_axis.
@@ -165,7 +168,7 @@ pub(crate) fn all() -> Vec<Arc<dyn Component>> {
             },
             eval: |inputs, _| {
                 let c = util::curve(inputs, 0, "curve")?;
-                let t = util::finite(inputs, 1, "t")?.max(0.0).min(1.0);
+                let t = util::finite(inputs, 1, "t")?.clamp(0.0, 1.0);
                 Ok(vec![
                     Value::Vector(c.point_at(t)),
                     Value::Vector(c.tangent_at(t)),

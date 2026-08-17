@@ -15,19 +15,35 @@
 //!              (exact field order as the struct declares)
 //!   hash     = lowercase hex sha256(signable bytes)
 //!   sig      = lowercase hex ed25519 signature over the RAW 32 hash bytes
-//! Genesis: index 0, prev_hash = 64*'0', timestamp 0, author "genesis",
-//! author_pk "", message "MantisCAD genesis", ops [], sig "" (exempt from
-//! signature verification; hash still verified).
+//! Legacy-v1 genesis: index 0, prev_hash = 64*'0', timestamp 0, author
+//! "genesis", author_pk "", message "MantisCAD genesis", ops [], sig "".
+//! Scoped-v2 uses the same frozen fields but domain-separates the message as
+//! "MantisCAD genesis v2:<64-lowerhex-chain-id>". Both genesis variants are
+//! exempt from signature verification; their exact hashes are still checked.
 
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use mantis_graph::{Graph, GraphOp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// `prev_hash` of the genesis block: 64 ASCII zeros.
 const GENESIS_PREV_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const GENESIS_AUTHOR: &str = "genesis";
 const GENESIS_MESSAGE: &str = "MantisCAD genesis";
+const SCOPED_GENESIS_MESSAGE_PREFIX: &str = "MantisCAD genesis v2:";
+
+/// Version of the original, globally fixed genesis format.
+pub const LEGACY_CHAIN_FORMAT_VERSION: u32 = 1;
+
+/// Version of the project-scoped, domain-separated genesis format.
+pub const SCOPED_CHAIN_FORMAT_VERSION: u32 = 2;
+
+/// Latest chain format produced for newly provisioned projects.
+///
+/// `Chain::new()` intentionally remains legacy-compatible. New projects
+/// should use `Chain::new_scoped` and persist its chain id in their manifest.
+pub const CHAIN_FORMAT_VERSION: u32 = SCOPED_CHAIN_FORMAT_VERSION;
 
 // ---------------------------------------------------------------------------
 // hex helpers (local, dependency-free)
@@ -56,7 +72,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
@@ -64,6 +80,12 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
     }
     Some(out)
+}
+
+fn is_lower_hex(s: &str, byte_len: usize) -> bool {
+    s.len() == byte_len * 2
+        && s.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +104,40 @@ pub struct Block {
     pub ops: Vec<GraphOp>,
     pub hash: String,
     pub sig: String,
+}
+
+/// Deterministic provenance summary for one signing key.
+///
+/// Names are informational claims signed by the key, not identities bestowed
+/// by the server. Keeping every claimed name makes key reuse/renames visible
+/// instead of silently collapsing them into the latest display name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorActivity {
+    pub public_key: String,
+    pub names: Vec<String>,
+    pub block_count: usize,
+    pub operation_count: usize,
+    pub first_block: u64,
+    pub last_block: u64,
+}
+
+/// A validated, compact checkpoint suitable for audit UIs and automation.
+///
+/// `Chain::audit` only produces this value after verifying every hash, link,
+/// signature, and graph operation. The `head_hash` can be stored or anchored
+/// externally as a compact commitment to the complete ordered history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainAudit {
+    pub format_version: u32,
+    /// Present for scoped-v2 chains, absent for legacy-v1 chains.
+    pub chain_id: Option<String>,
+    pub genesis_hash: String,
+    pub head_hash: String,
+    pub block_count: usize,
+    pub signed_block_count: usize,
+    pub operation_count: usize,
+    pub byte_size: usize,
+    pub authors: Vec<AuthorActivity>,
 }
 
 /// The exact byte layout covered by a block hash. serde_json emits struct
@@ -128,7 +184,7 @@ impl Block {
 }
 
 /// Builds the canonical genesis block (hash filled in, sig empty).
-fn genesis_block() -> Block {
+fn legacy_genesis_block() -> Block {
     let mut b = Block {
         index: 0,
         prev_hash: GENESIS_PREV_HASH.to_string(),
@@ -142,6 +198,25 @@ fn genesis_block() -> Block {
     };
     b.hash = b.compute_hash();
     b
+}
+
+/// Builds a project-scoped genesis without adding fields to the frozen block
+/// signable. The domain and chain id live in the existing signed `message`
+/// field, so every scoped project receives a distinct genesis hash.
+fn scoped_genesis_block(chain_id: &str) -> Block {
+    let mut block = Block {
+        index: 0,
+        prev_hash: GENESIS_PREV_HASH.to_string(),
+        timestamp_ms: 0,
+        author: GENESIS_AUTHOR.to_string(),
+        author_pk: String::new(),
+        message: format!("{SCOPED_GENESIS_MESSAGE_PREFIX}{chain_id}"),
+        ops: Vec::new(),
+        hash: String::new(),
+        sig: String::new(),
+    };
+    block.hash = block.compute_hash();
+    block
 }
 
 // ---------------------------------------------------------------------------
@@ -202,30 +277,127 @@ impl Identity {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChainError {
     Empty,
-    BadIndex { at: usize },
-    BadPrevHash { at: usize },
-    BadHash { at: usize },
-    BadSignature { at: usize },
+    BadIndex {
+        at: usize,
+    },
+    BadPrevHash {
+        at: usize,
+    },
+    BadHash {
+        at: usize,
+    },
+    BadSignature {
+        at: usize,
+    },
     /// Replay failed: block index, op index, message.
-    BadOps { block: usize, op: usize, msg: String },
+    BadOps {
+        block: usize,
+        op: usize,
+        msg: String,
+    },
     /// Foreign blocks don't chain onto our head.
-    Diverged { at_index: u64 },
+    Diverged {
+        at_index: u64,
+    },
     EmptyOps,
     BadKey,
+    /// A scoped genesis carries a chain id that is not 32 bytes of canonical
+    /// lowercase hexadecimal.
+    BadChainId,
     /// An op carries a non-finite float (NaN / ±Infinity). serde_json cannot
     /// represent those (it emits `null`), so they would corrupt the block hash
-    /// and make the chain un-reloadable. `block` is the block position (0 for a
-    /// not-yet-sealed `append`), `op` the offending op index.
-    NonFinite { block: usize, op: usize },
+    /// and make the chain un-reloadable. `block` is the block position the op
+    /// occupies (or would occupy during `append`), `op` its offset in the block.
+    NonFinite {
+        block: usize,
+        op: usize,
+    },
     Json(String),
 }
 
 impl std::fmt::Display for ChainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            ChainError::Empty => write!(f, "chain has no genesis block"),
+            ChainError::BadIndex { at } => {
+                write!(f, "block at position {at} has a non-sequential index")
+            }
+            ChainError::BadPrevHash { at } => {
+                write!(f, "block at position {at} does not link to its predecessor")
+            }
+            ChainError::BadHash { at } => {
+                write!(f, "block at position {at} does not match its content hash")
+            }
+            ChainError::BadSignature { at } => {
+                write!(f, "block at position {at} has an invalid signature")
+            }
+            ChainError::BadOps { block, op, msg } => {
+                write!(f, "block {block} operation {op} cannot be replayed: {msg}")
+            }
+            ChainError::Diverged { at_index } => {
+                write!(f, "history diverges at block index {at_index}")
+            }
+            ChainError::EmptyOps => write!(f, "cannot append an empty operation list"),
+            ChainError::BadKey => write!(f, "invalid Ed25519 public or secret key"),
+            ChainError::BadChainId => write!(
+                f,
+                "invalid chain id (expected 64 lowercase hexadecimal characters)"
+            ),
+            ChainError::NonFinite { block, op } => write!(
+                f,
+                "block {block} operation {op} contains a non-finite number"
+            ),
+            ChainError::Json(msg) => write!(f, "invalid chain JSON: {msg}"),
+        }
     }
 }
 impl std::error::Error for ChainError {}
+
+impl ChainError {
+    /// Stable, machine-readable category for API clients.
+    ///
+    /// Human-facing `Display` text may become more descriptive; automation
+    /// should branch on this code instead.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            ChainError::Empty => "empty_chain",
+            ChainError::BadIndex { .. } => "bad_index",
+            ChainError::BadPrevHash { .. } => "bad_prev_hash",
+            ChainError::BadHash { .. } => "bad_hash",
+            ChainError::BadSignature { .. } => "bad_signature",
+            ChainError::BadOps { .. } => "bad_ops",
+            ChainError::Diverged { .. } => "diverged",
+            ChainError::EmptyOps => "empty_ops",
+            ChainError::BadKey => "bad_key",
+            ChainError::BadChainId => "bad_chain_id",
+            ChainError::NonFinite { .. } => "non_finite",
+            ChainError::Json(_) => "invalid_json",
+        }
+    }
+
+    /// Block position/index associated with the error, when available.
+    pub fn block_index(&self) -> Option<u64> {
+        match self {
+            ChainError::BadIndex { at }
+            | ChainError::BadPrevHash { at }
+            | ChainError::BadHash { at }
+            | ChainError::BadSignature { at } => u64::try_from(*at).ok(),
+            ChainError::BadOps { block, .. } | ChainError::NonFinite { block, .. } => {
+                u64::try_from(*block).ok()
+            }
+            ChainError::Diverged { at_index } => Some(*at_index),
+            _ => None,
+        }
+    }
+
+    /// Operation offset associated with an op-level error, when available.
+    pub const fn operation_index(&self) -> Option<usize> {
+        match self {
+            ChainError::BadOps { op, .. } | ChainError::NonFinite { op, .. } => Some(*op),
+            _ => None,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Chain
@@ -238,13 +410,18 @@ pub struct Chain {
 
 /// Verifies a block's signature against its own `author_pk` and `hash`.
 /// `at` is the position used in error reporting.
-fn verify_sig(block: &Block, at: usize) -> Result<(), ChainError> {
+fn verify_sig(block: &Block, at: usize, strict_hex: bool) -> Result<(), ChainError> {
+    if strict_hex && !is_lower_hex(&block.author_pk, 32) {
+        return Err(ChainError::BadKey);
+    }
     let pk_bytes = hex_decode(&block.author_pk).ok_or(ChainError::BadKey)?;
     let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| ChainError::BadKey)?;
     let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| ChainError::BadKey)?;
+    if strict_hex && !is_lower_hex(&block.sig, 64) {
+        return Err(ChainError::BadSignature { at });
+    }
     let sig_bytes = hex_decode(&block.sig).ok_or(ChainError::BadSignature { at })?;
-    let sig =
-        Signature::from_slice(&sig_bytes).map_err(|_| ChainError::BadSignature { at })?;
+    let sig = Signature::from_slice(&sig_bytes).map_err(|_| ChainError::BadSignature { at })?;
     let raw_hash = hex_decode(&block.hash).ok_or(ChainError::BadHash { at })?;
     vk.verify(&raw_hash, &sig)
         .map_err(|_| ChainError::BadSignature { at })
@@ -265,12 +442,20 @@ fn verify_finite_ops(block: &Block, at: usize) -> Result<(), ChainError> {
 
 /// Structural verification of a non-genesis block against its predecessor:
 /// sequential index, prev_hash link, hash recomputes, signature verifies.
-fn verify_linked_block(block: &Block, prev: &Block, at: usize) -> Result<(), ChainError> {
-    if block.index != prev.index + 1 {
+fn verify_linked_block(
+    block: &Block,
+    prev: &Block,
+    at: usize,
+    strict_hex: bool,
+) -> Result<(), ChainError> {
+    if prev.index.checked_add(1) != Some(block.index) {
         return Err(ChainError::BadIndex { at });
     }
     if block.prev_hash != prev.hash {
         return Err(ChainError::BadPrevHash { at });
+    }
+    if block.ops.is_empty() {
+        return Err(ChainError::EmptyOps);
     }
     // Reject non-finite ops before trusting the hash: a `null`-serialized float
     // hashes consistently, so BadHash would NOT catch it.
@@ -278,14 +463,90 @@ fn verify_linked_block(block: &Block, prev: &Block, at: usize) -> Result<(), Cha
     if block.hash != block.compute_hash() {
         return Err(ChainError::BadHash { at });
     }
-    verify_sig(block, at)
+    verify_sig(block, at, strict_hex)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenesisKind<'a> {
+    Legacy,
+    Scoped(&'a str),
+}
+
+/// Classify and validate the exact canonical genesis shape. Field-specific
+/// legacy errors are preserved for compatibility with existing callers.
+fn validate_genesis(genesis: &Block) -> Result<GenesisKind<'_>, ChainError> {
+    if genesis.index != 0 {
+        return Err(ChainError::BadIndex { at: 0 });
+    }
+    if genesis.prev_hash != GENESIS_PREV_HASH {
+        return Err(ChainError::BadPrevHash { at: 0 });
+    }
+    if !genesis.sig.is_empty() {
+        return Err(ChainError::BadSignature { at: 0 });
+    }
+
+    let kind = if genesis.message == GENESIS_MESSAGE {
+        GenesisKind::Legacy
+    } else if let Some(chain_id) = genesis.message.strip_prefix(SCOPED_GENESIS_MESSAGE_PREFIX) {
+        if !is_lower_hex(chain_id, 32) {
+            return Err(ChainError::BadChainId);
+        }
+        GenesisKind::Scoped(chain_id)
+    } else {
+        return Err(ChainError::BadHash { at: 0 });
+    };
+
+    let canonical = match kind {
+        GenesisKind::Legacy => legacy_genesis_block(),
+        GenesisKind::Scoped(chain_id) => scoped_genesis_block(chain_id),
+    };
+    if *genesis != canonical {
+        return Err(ChainError::BadHash { at: 0 });
+    }
+    Ok(kind)
 }
 
 impl Chain {
-    /// New chain containing only the genesis block.
+    /// New legacy-v1 chain containing the globally fixed genesis block.
+    ///
+    /// Kept deliberately stable so existing local documents and fixtures do
+    /// not silently change identity. New collaborative projects should call
+    /// [`Chain::new_scoped`].
     pub fn new() -> Chain {
         Chain {
-            blocks: vec![genesis_block()],
+            blocks: vec![legacy_genesis_block()],
+        }
+    }
+
+    /// New v2 chain with a project-scoped genesis.
+    ///
+    /// `chain_id` is exactly 32 random bytes represented as 64 lowercase hex
+    /// characters. Randomness is supplied by the caller so this crate remains
+    /// deterministic and usable in replay/test environments.
+    pub fn new_scoped(chain_id: &str) -> Result<Chain, ChainError> {
+        if !is_lower_hex(chain_id, 32) {
+            return Err(ChainError::BadChainId);
+        }
+        Ok(Chain {
+            blocks: vec![scoped_genesis_block(chain_id)],
+        })
+    }
+
+    /// The validated format version encoded by this chain's genesis.
+    pub fn format_version(&self) -> Result<u32, ChainError> {
+        let genesis = self.blocks.first().ok_or(ChainError::Empty)?;
+        match validate_genesis(genesis)? {
+            GenesisKind::Legacy => Ok(LEGACY_CHAIN_FORMAT_VERSION),
+            GenesisKind::Scoped(_) => Ok(SCOPED_CHAIN_FORMAT_VERSION),
+        }
+    }
+
+    /// The validated scoped chain id, or `None` for a legacy-v1 chain.
+    pub fn chain_id(&self) -> Result<Option<&str>, ChainError> {
+        let genesis = self.blocks.first().ok_or(ChainError::Empty)?;
+        match validate_genesis(genesis)? {
+            GenesisKind::Legacy => Ok(None),
+            GenesisKind::Scoped(chain_id) => Ok(Some(chain_id)),
         }
     }
 
@@ -296,7 +557,7 @@ impl Chain {
         self.blocks.len()
     }
     pub fn is_empty(&self) -> bool {
-        false
+        self.blocks.is_empty()
     }
     pub fn total_ops(&self) -> usize {
         self.blocks.iter().map(|b| b.ops.len()).sum()
@@ -306,10 +567,12 @@ impl Chain {
         serde_json::to_string(self).map(|s| s.len()).unwrap_or(0)
     }
 
-    /// Seal `ops` into a new signed block on the head. Rejects empty ops.
-    /// Ops are NOT re-validated against a replayed graph here — callers keep
-    /// the invariant that pending ops were applied to a graph built from this
-    /// chain (validate() / replay() are the safety net).
+    /// Seal `ops` into a new signed block on the head. Rejects empty or
+    /// unreplayable ops and refuses to build on an invalid local history.
+    ///
+    /// All checks happen before mutation, so an error leaves the chain exactly
+    /// as it was. This matters for non-UI callers (including agents), which may
+    /// construct `GraphOp`s directly instead of going through a live `Graph`.
     pub fn append(
         &mut self,
         ops: Vec<GraphOp>,
@@ -320,10 +583,22 @@ impl Chain {
         if ops.is_empty() {
             return Err(ChainError::EmptyOps);
         }
+        let new_block = self.blocks.len();
         for (oi, op) in ops.iter().enumerate() {
             if !op.is_finite() {
-                return Err(ChainError::NonFinite { block: 0, op: oi });
+                return Err(ChainError::NonFinite {
+                    block: new_block,
+                    op: oi,
+                });
             }
+        }
+        let mut graph = self.validate_and_replay()?;
+        for (oi, op) in ops.iter().enumerate() {
+            graph.apply(op).map_err(|e| ChainError::BadOps {
+                block: new_block,
+                op: oi,
+                msg: e.to_string(),
+            })?;
         }
         let head = self.head();
         let mut block = Block {
@@ -347,27 +622,114 @@ impl Chain {
     /// hashes recompute, signatures verify (non-genesis), and the whole op
     /// log replays cleanly through `Graph::apply`.
     pub fn validate(&self) -> Result<(), ChainError> {
+        self.validate_and_replay().map(|_| ())
+    }
+
+    /// Validate the complete history once and return its materialized graph.
+    /// Keeping these operations together prevents append/extend from checking
+    /// semantics while accidentally building on broken hashes or signatures.
+    fn validate_and_replay(&self) -> Result<Graph, ChainError> {
         let genesis = self.blocks.first().ok_or(ChainError::Empty)?;
-        let canon = genesis_block();
-        if *genesis != canon {
-            return Err(if genesis.index != 0 {
-                ChainError::BadIndex { at: 0 }
-            } else if genesis.prev_hash != canon.prev_hash {
-                ChainError::BadPrevHash { at: 0 }
-            } else if !genesis.sig.is_empty() {
-                ChainError::BadSignature { at: 0 }
-            } else {
-                // any other field mismatch necessarily changes (or breaks)
-                // the hash relative to the canonical genesis
-                ChainError::BadHash { at: 0 }
-            });
-        }
+        let strict_hex = matches!(validate_genesis(genesis)?, GenesisKind::Scoped(_));
         for at in 1..self.blocks.len() {
-            verify_linked_block(&self.blocks[at], &self.blocks[at - 1], at)?;
+            verify_linked_block(&self.blocks[at], &self.blocks[at - 1], at, strict_hex)?;
         }
         // Replay the whole op log; any failure surfaces as BadOps.
-        self.replay(None)?;
-        Ok(())
+        self.replay(None)
+    }
+
+    /// Verify a candidate extension against the trusted current head without
+    /// re-validating or replaying the already accepted prefix.
+    ///
+    /// This is intended for servers that validate a persisted chain once at
+    /// startup and retain its materialized [`Graph`]. It checks every new
+    /// block's index/link, finite values, hash, and signature, and checks
+    /// already-known blocks by `(index, hash)`. It deliberately does not scan
+    /// the existing history or apply graph semantics. Callers must preserve
+    /// the invariant that `self` was fully validated before it became trusted.
+    pub fn verify_extension_crypto(&self, blocks: &[Block]) -> Result<usize, ChainError> {
+        let strict_hex = self.format_version()? == SCOPED_CHAIN_FORMAT_VERSION;
+        let mut appended: Vec<&Block> = Vec::new();
+        for block in blocks {
+            let head = appended.last().copied().unwrap_or_else(|| self.head());
+            if block.index <= head.index {
+                let pos = usize::try_from(block.index).map_err(|_| ChainError::Diverged {
+                    at_index: block.index,
+                })?;
+                let known = if pos < self.blocks.len() {
+                    &self.blocks[pos]
+                } else {
+                    let appended_pos = pos.saturating_sub(self.blocks.len());
+                    appended
+                        .get(appended_pos)
+                        .copied()
+                        .ok_or(ChainError::Diverged {
+                            at_index: block.index,
+                        })?
+                };
+                if known.index != block.index || known.hash != block.hash {
+                    return Err(ChainError::Diverged {
+                        at_index: block.index,
+                    });
+                }
+                continue;
+            }
+            if head.index.checked_add(1) != Some(block.index) || block.prev_hash != head.hash {
+                return Err(ChainError::Diverged {
+                    at_index: block.index,
+                });
+            }
+            let at = usize::try_from(block.index)
+                .map_err(|_| ChainError::BadIndex { at: usize::MAX })?;
+            verify_linked_block(block, head, at, strict_hex)?;
+            appended.push(block);
+        }
+        Ok(appended.len())
+    }
+
+    /// Atomically apply a cryptographically verified extension to a trusted
+    /// materialized graph without replaying the accepted prefix.
+    ///
+    /// `materialized` must be the graph produced by this exact chain. Servers
+    /// should first call [`Chain::verify_extension_crypto`], then rate-limit
+    /// the proven signing keys, and only then call this method. Verification is
+    /// repeated here so the method remains safe as a standalone atomic update.
+    pub fn try_extend_trusted(
+        &mut self,
+        materialized: &mut Graph,
+        blocks: &[Block],
+    ) -> Result<usize, ChainError> {
+        let appended = self.verify_extension_crypto(blocks)?;
+        let original_len = self.blocks.len();
+        let mut next_index =
+            u64::try_from(original_len).map_err(|_| ChainError::BadIndex { at: usize::MAX })?;
+        let mut candidate_graph = materialized.clone();
+        let mut tail = Vec::with_capacity(appended);
+        for block in blocks {
+            let Ok(index) = usize::try_from(block.index) else {
+                return Err(ChainError::BadIndex { at: usize::MAX });
+            };
+            if block.index < next_index {
+                continue;
+            }
+            debug_assert_eq!(block.index, next_index);
+            for (op, graph_op) in block.ops.iter().enumerate() {
+                candidate_graph
+                    .apply(graph_op)
+                    .map_err(|error| ChainError::BadOps {
+                        block: index,
+                        op,
+                        msg: error.to_string(),
+                    })?;
+            }
+            tail.push(block.clone());
+            next_index = next_index
+                .checked_add(1)
+                .ok_or(ChainError::BadIndex { at: usize::MAX })?;
+        }
+        self.blocks.extend(tail);
+        *materialized = candidate_graph;
+        Ok(appended)
     }
 
     /// Rebuild the document by replaying blocks 0..=upto (None = all).
@@ -397,57 +759,57 @@ impl Chain {
     ///
     /// All-or-nothing: on any error `self` is left unmodified.
     pub fn try_extend(&mut self, blocks: &[Block]) -> Result<usize, ChainError> {
-        // Materialize our current document once; candidates replay on top.
-        let mut graph = self.replay(None)?;
-        let mut appended: Vec<Block> = Vec::new();
-        for block in blocks {
-            let (head_index, head_hash) = {
-                let head = appended.last().unwrap_or_else(|| self.head());
-                (head.index, head.hash.clone())
-            };
-            if block.index <= head_index {
-                // Already-known territory: must match our block exactly by
-                // (index, hash), otherwise the peer has forked history.
-                let pos = block.index as usize;
-                let known = if pos < self.blocks.len() {
-                    &self.blocks[pos]
-                } else {
-                    &appended[pos - self.blocks.len()]
-                };
-                if known.index != block.index || known.hash != block.hash {
-                    return Err(ChainError::Diverged {
-                        at_index: block.index,
-                    });
-                }
-                continue;
-            }
-            if block.index != head_index + 1 || block.prev_hash != head_hash {
-                return Err(ChainError::Diverged {
-                    at_index: block.index,
-                });
-            }
-            let at = block.index as usize;
-            verify_finite_ops(block, at)?;
-            if block.hash != block.compute_hash() {
-                return Err(ChainError::BadHash { at });
-            }
-            verify_sig(block, at)?;
-            // Trial replay before committing: a hash/sig-valid block whose
-            // ops don't apply is rejected and nothing is mutated.
-            let mut trial = graph.clone();
-            for (oi, op) in block.ops.iter().enumerate() {
-                trial.apply(op).map_err(|e| ChainError::BadOps {
-                    block: at,
-                    op: oi,
-                    msg: e.to_string(),
-                })?;
-            }
-            graph = trial;
-            appended.push(block.clone());
+        let mut graph = self.validate_and_replay()?;
+        self.try_extend_trusted(&mut graph, blocks)
+    }
+
+    /// Validate the full chain and return a deterministic provenance/checkpoint
+    /// summary. Persisting just `head_hash` is enough to later detect any
+    /// rewrite when the full chain is audited again.
+    pub fn audit(&self) -> Result<ChainAudit, ChainError> {
+        self.validate_and_replay()?;
+
+        #[derive(Default)]
+        struct Activity {
+            names: BTreeSet<String>,
+            block_count: usize,
+            operation_count: usize,
+            first_block: Option<u64>,
+            last_block: u64,
         }
-        let count = appended.len();
-        self.blocks.extend(appended);
-        Ok(count)
+
+        let mut by_key: BTreeMap<String, Activity> = BTreeMap::new();
+        for block in self.blocks.iter().skip(1) {
+            let activity = by_key.entry(block.author_pk.clone()).or_default();
+            activity.names.insert(block.author.clone());
+            activity.block_count += 1;
+            activity.operation_count += block.ops.len();
+            activity.first_block.get_or_insert(block.index);
+            activity.last_block = block.index;
+        }
+        let authors = by_key
+            .into_iter()
+            .map(|(public_key, activity)| AuthorActivity {
+                public_key,
+                names: activity.names.into_iter().collect(),
+                block_count: activity.block_count,
+                operation_count: activity.operation_count,
+                first_block: activity.first_block.unwrap_or(0),
+                last_block: activity.last_block,
+            })
+            .collect();
+
+        Ok(ChainAudit {
+            format_version: self.format_version()?,
+            chain_id: self.chain_id()?.map(str::to_owned),
+            genesis_hash: self.blocks[0].hash.clone(),
+            head_hash: self.head().hash.clone(),
+            block_count: self.len(),
+            signed_block_count: self.len().saturating_sub(1),
+            operation_count: self.total_ops(),
+            byte_size: self.byte_size(),
+            authors,
+        })
     }
 
     pub fn to_json(&self) -> String {
@@ -456,8 +818,7 @@ impl Chain {
 
     /// Parses AND validates.
     pub fn from_json(s: &str) -> Result<Chain, ChainError> {
-        let chain: Chain =
-            serde_json::from_str(s).map_err(|e| ChainError::Json(e.to_string()))?;
+        let chain: Chain = serde_json::from_str(s).map_err(|e| ChainError::Json(e.to_string()))?;
         chain.validate()?;
         Ok(chain)
     }
@@ -480,8 +841,7 @@ mod tests {
 
     /// sha256 of the canonical genesis signable JSON, precomputed externally.
     /// Pins the frozen hash format across refactors.
-    const GENESIS_HASH: &str =
-        "6647ae8b4509faf6518cdfc11e2f778c856e3c0fe82a557e745f675a7cab0bee";
+    const GENESIS_HASH: &str = "6647ae8b4509faf6518cdfc11e2f778c856e3c0fe82a557e745f675a7cab0bee";
 
     fn ident(name: &str) -> Identity {
         Identity::generate(name)
@@ -560,6 +920,62 @@ mod tests {
         assert_eq!(g.sig, "");
         assert_eq!(g.hash, GENESIS_HASH);
         a.validate().unwrap();
+        assert_eq!(a.format_version(), Ok(LEGACY_CHAIN_FORMAT_VERSION));
+        assert_eq!(a.chain_id(), Ok(None));
+    }
+
+    #[test]
+    fn scoped_genesis_is_unique_domain_separated_and_stable() {
+        let chain_id_a = "01".repeat(32);
+        let chain_id_b = "02".repeat(32);
+        let a = Chain::new_scoped(&chain_id_a).unwrap();
+        let same = Chain::new_scoped(&chain_id_a).unwrap();
+        let b = Chain::new_scoped(&chain_id_b).unwrap();
+
+        assert_eq!(a, same);
+        assert_ne!(a.head().hash, b.head().hash);
+        assert_ne!(a.head().hash, Chain::new().head().hash);
+        assert_eq!(
+            a.head().message,
+            format!("MantisCAD genesis v2:{chain_id_a}")
+        );
+        assert_eq!(a.format_version(), Ok(SCOPED_CHAIN_FORMAT_VERSION));
+        assert_eq!(a.chain_id(), Ok(Some(chain_id_a.as_str())));
+        a.validate().unwrap();
+    }
+
+    #[test]
+    fn scoped_chain_id_is_strict_lowercase_hex() {
+        for invalid in [
+            "",
+            "01",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &"A".repeat(64),
+            &"gg".repeat(32),
+        ] {
+            assert_eq!(Chain::new_scoped(invalid), Err(ChainError::BadChainId));
+        }
+    }
+
+    #[test]
+    fn scoped_chain_rejects_noncanonical_key_and_signature_hex() {
+        let id = ident("alice");
+        let mut chain = Chain::new_scoped(&"ab".repeat(32)).unwrap();
+        chain.append(ops_block_a(), "add", &id, 1).unwrap();
+
+        let mut uppercase_key = chain.clone();
+        uppercase_key.blocks[1].author_pk = uppercase_key.blocks[1].author_pk.to_uppercase();
+        uppercase_key.blocks[1].hash = uppercase_key.blocks[1].compute_hash();
+        uppercase_key.blocks[1].sig = id.sign_hash_hex(&uppercase_key.blocks[1].hash);
+        assert_eq!(uppercase_key.validate(), Err(ChainError::BadKey));
+
+        let mut uppercase_sig = chain;
+        uppercase_sig.blocks[1].sig = uppercase_sig.blocks[1].sig.to_uppercase();
+        assert_eq!(
+            uppercase_sig.validate(),
+            Err(ChainError::BadSignature { at: 1 })
+        );
     }
 
     #[test]
@@ -622,6 +1038,71 @@ mod tests {
             Err(ChainError::EmptyOps)
         );
         assert_eq!(chain.len(), 1);
+    }
+
+    #[test]
+    fn handcrafted_signed_empty_blocks_are_rejected_everywhere() {
+        let id = ident("spammer");
+        let empty = seal(Chain::new().head(), vec![], &id, 1);
+
+        let mut loaded = Chain::new();
+        loaded.blocks.push(empty.clone());
+        assert_eq!(loaded.validate(), Err(ChainError::EmptyOps));
+
+        let mut extended = Chain::new();
+        assert_eq!(
+            extended.try_extend(std::slice::from_ref(&empty)),
+            Err(ChainError::EmptyOps)
+        );
+        assert_eq!(extended, Chain::new());
+    }
+
+    #[test]
+    fn append_rejects_unreplayable_ops_atomically() {
+        let id = ident("agent");
+        let mut chain = Chain::new();
+        let before = chain.clone();
+        let result = chain.append(
+            vec![GraphOp::SetParam {
+                id: NodeId(0xdead),
+                key: "value".into(),
+                value: ParamValue::Number(2.0),
+            }],
+            "invalid direct op",
+            &id,
+            1,
+        );
+        assert!(matches!(
+            result,
+            Err(ChainError::BadOps {
+                block: 1,
+                op: 0,
+                ..
+            })
+        ));
+        assert_eq!(chain, before);
+    }
+
+    #[test]
+    fn append_refuses_to_build_on_tampered_history() {
+        let (mut chain, id) = sample_chain();
+        chain.blocks[1].message = "rewritten history".into();
+        let len = chain.len();
+        assert_eq!(
+            chain
+                .append(
+                    vec![GraphOp::MoveNode {
+                        id: NodeId(1),
+                        pos: (1.0, 1.0),
+                    }],
+                    "must not seal",
+                    &id,
+                    3,
+                )
+                .err(),
+            Some(ChainError::BadHash { at: 1 })
+        );
+        assert_eq!(chain.len(), len);
     }
 
     // -- tamper detection ------------------------------------------------------
@@ -830,13 +1311,8 @@ mod tests {
         let mut fork = Chain {
             blocks: chain.blocks[..2].to_vec(),
         };
-        fork.append(
-            vec![GraphOp::RemoveNode { id: NodeId(2) }],
-            "fork!",
-            &id,
-            7,
-        )
-        .unwrap();
+        fork.append(vec![GraphOp::RemoveNode { id: NodeId(2) }], "fork!", &id, 7)
+            .unwrap();
         let mut ours = chain.clone();
         assert_eq!(
             ours.try_extend(&fork.blocks),
@@ -920,6 +1396,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn try_extend_refuses_tampered_local_history_even_for_noop() {
+        let (mut chain, _) = sample_chain();
+        chain.blocks[1].message = "rewritten history".into();
+        assert_eq!(chain.try_extend(&[]), Err(ChainError::BadHash { at: 1 }));
+    }
+
+    #[test]
+    fn trusted_extension_checks_only_the_new_tail_and_applies_incrementally() {
+        let (clean, identity) = sample_chain();
+        let mut extended = clean.clone();
+        extended
+            .append(
+                vec![GraphOp::MoveNode {
+                    id: NodeId(1),
+                    pos: (42.0, 24.0),
+                }],
+                "trusted incremental update",
+                &identity,
+                10,
+            )
+            .unwrap();
+
+        let mut trusted = clean.clone();
+        let mut materialized = trusted.replay(None).unwrap();
+        // A server is required to protect this trusted-prefix invariant. The
+        // deliberate corruption proves the extension API does not rescan it.
+        trusted.blocks[1].hash = "ff".repeat(32);
+        assert!(trusted.validate().is_err());
+
+        let tail = &extended.blocks[clean.len()..];
+        let duplicate_tail = vec![tail[0].clone(), tail[0].clone()];
+        assert_eq!(trusted.verify_extension_crypto(&duplicate_tail).unwrap(), 1);
+        assert_eq!(
+            trusted
+                .try_extend_trusted(&mut materialized, &duplicate_tail)
+                .unwrap(),
+            1
+        );
+        assert_eq!(trusted.len(), extended.len());
+        assert_eq!(materialized, extended.replay(None).unwrap());
+    }
+
     // -- json -------------------------------------------------------------------
 
     #[test]
@@ -937,15 +1456,67 @@ mod tests {
         let (chain, _) = sample_chain();
         // flip a message deep inside the JSON -> hash mismatch on validate
         let json = chain.to_json().replace("add nodes", "ADD NODES");
-        assert_eq!(
-            Chain::from_json(&json),
-            Err(ChainError::BadHash { at: 1 })
-        );
+        assert_eq!(Chain::from_json(&json), Err(ChainError::BadHash { at: 1 }));
         // syntactically broken JSON -> Json error
         match Chain::from_json("{not json") {
             Err(ChainError::Json(_)) => {}
             other => panic!("expected Json error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn audit_is_validated_deterministic_provenance_checkpoint() {
+        let (mut chain, mut id) = sample_chain();
+        id.name = "alice-renamed".into();
+        chain
+            .append(
+                vec![GraphOp::MoveNode {
+                    id: NodeId(1),
+                    pos: (7.0, 8.0),
+                }],
+                "rename is visible by key",
+                &id,
+                3000,
+            )
+            .unwrap();
+
+        let audit = chain.audit().unwrap();
+        assert_eq!(audit.format_version, LEGACY_CHAIN_FORMAT_VERSION);
+        assert_eq!(audit.chain_id, None);
+        assert_eq!(audit.genesis_hash, GENESIS_HASH);
+        assert_eq!(audit.head_hash, chain.head().hash);
+        assert_eq!(audit.block_count, 4);
+        assert_eq!(audit.signed_block_count, 3);
+        assert_eq!(audit.operation_count, 5);
+        assert_eq!(audit.byte_size, chain.byte_size());
+        assert_eq!(audit.authors.len(), 1);
+        assert_eq!(audit.authors[0].public_key, id.public_hex());
+        assert_eq!(audit.authors[0].names, ["alice", "alice-renamed"]);
+        assert_eq!(audit.authors[0].block_count, 3);
+        assert_eq!(audit.authors[0].operation_count, 5);
+        assert_eq!(audit.authors[0].first_block, 1);
+        assert_eq!(audit.authors[0].last_block, 3);
+
+        let json = serde_json::to_string(&audit).unwrap();
+        assert_eq!(serde_json::from_str::<ChainAudit>(&json).unwrap(), audit);
+
+        chain.blocks[2].sig = "00".repeat(64);
+        assert_eq!(chain.audit(), Err(ChainError::BadSignature { at: 2 }));
+    }
+
+    #[test]
+    fn chain_error_exposes_stable_machine_context() {
+        let error = ChainError::BadOps {
+            block: 7,
+            op: 3,
+            msg: "unknown node".into(),
+        };
+        assert_eq!(error.code(), "bad_ops");
+        assert_eq!(error.block_index(), Some(7));
+        assert_eq!(error.operation_index(), Some(3));
+        assert!(error.to_string().contains("unknown node"));
+        assert_eq!(ChainError::BadKey.code(), "bad_key");
+        assert_eq!(ChainError::BadKey.block_index(), None);
     }
 
     // -- identity ------------------------------------------------------------------

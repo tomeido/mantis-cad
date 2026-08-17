@@ -25,13 +25,28 @@ pub struct PortSpec {
 
 impl PortSpec {
     pub fn item(name: &'static str, ty: ValueKind) -> PortSpec {
-        PortSpec { name, ty, access: Access::Item, default: None }
+        PortSpec {
+            name,
+            ty,
+            access: Access::Item,
+            default: None,
+        }
     }
     pub fn item_default(name: &'static str, ty: ValueKind, default: Value) -> PortSpec {
-        PortSpec { name, ty, access: Access::Item, default: Some(default) }
+        PortSpec {
+            name,
+            ty,
+            access: Access::Item,
+            default: Some(default),
+        }
     }
     pub fn list(name: &'static str, ty: ValueKind) -> PortSpec {
-        PortSpec { name, ty, access: Access::List, default: None }
+        PortSpec {
+            name,
+            ty,
+            access: Access::List,
+            default: None,
+        }
     }
 }
 
@@ -63,7 +78,9 @@ pub struct Registry {
 
 impl Registry {
     pub fn empty() -> Registry {
-        Registry { map: BTreeMap::new() }
+        Registry {
+            map: BTreeMap::new(),
+        }
     }
     /// All built-in components (see components/).
     pub fn standard() -> Registry {

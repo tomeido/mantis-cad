@@ -120,9 +120,9 @@ pub(crate) fn curves(inputs: &[Value], i: usize, name: &str) -> Result<Vec<Curve
         .iter()
         .enumerate()
         .map(|(k, v)| {
-            v.as_curve().map(|c| (*c).clone()).ok_or_else(|| {
-                format!("input {name}[{k}]: expected Curve, got {}", v.describe())
-            })
+            v.as_curve()
+                .map(|c| (*c).clone())
+                .ok_or_else(|| format!("input {name}[{k}]: expected Curve, got {}", v.describe()))
         })
         .collect()
 }
@@ -142,7 +142,12 @@ pub(crate) fn count(inputs: &[Value], i: usize, name: &str, max: usize) -> Resul
 }
 
 /// Tessellation segment count clamped into `[min, MAX_SEGMENTS]`.
-pub(crate) fn segments(inputs: &[Value], i: usize, name: &str, min: usize) -> Result<usize, String> {
+pub(crate) fn segments(
+    inputs: &[Value],
+    i: usize,
+    name: &str,
+    min: usize,
+) -> Result<usize, String> {
     let v = finite(inputs, i, name)?;
     let lo = min.min(MAX_SEGMENTS) as f64;
     Ok(v.floor().clamp(lo, MAX_SEGMENTS as f64) as usize)

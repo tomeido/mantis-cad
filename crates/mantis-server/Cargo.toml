@@ -7,5 +7,7 @@ license.workspace = true
 [dependencies]
 mantis-graph = { workspace = true }
 mantis-chain = { workspace = true }
+mantis-protocol = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tiny_http = { workspace = true }
