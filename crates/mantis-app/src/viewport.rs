@@ -143,8 +143,8 @@ impl Camera {
     /// Screen-space pan: `px_height` is the viewport height in points.
     pub fn pan(&mut self, dx: f64, dy: f64, px_height: f64) {
         let world_per_px = 2.0 * self.distance * (FOVY * 0.5).tan() / px_height.max(1.0);
-        self.target = self.target - self.right() * (dx * world_per_px)
-            + self.up() * (dy * world_per_px);
+        self.target =
+            self.target - self.right() * (dx * world_per_px) + self.up() * (dy * world_per_px);
     }
 
     /// Exponential dolly from scroll.
@@ -207,9 +207,18 @@ pub fn collect_scene(graph: &Graph, eval: &EvalOutput) -> Vec<SceneItem> {
 
 fn collect_value(node: NodeId, v: &Value, items: &mut Vec<SceneItem>, depth: usize) {
     match v {
-        Value::Mesh(m) => items.push(SceneItem { node, geom: SceneGeom::Mesh(m.clone()) }),
-        Value::Curve(c) => items.push(SceneItem { node, geom: SceneGeom::Curve(c.clone()) }),
-        Value::Vector(p) => items.push(SceneItem { node, geom: SceneGeom::Point(*p) }),
+        Value::Mesh(m) => items.push(SceneItem {
+            node,
+            geom: SceneGeom::Mesh(m.clone()),
+        }),
+        Value::Curve(c) => items.push(SceneItem {
+            node,
+            geom: SceneGeom::Curve(c.clone()),
+        }),
+        Value::Vector(p) => items.push(SceneItem {
+            node,
+            geom: SceneGeom::Point(*p),
+        }),
         Value::List(l) if depth < 8 => {
             for e in l {
                 collect_value(node, e, items, depth + 1);
@@ -319,7 +328,12 @@ pub struct SceneStats {
 
 impl Default for SceneStats {
     fn default() -> Self {
-        SceneStats { triangles: 0, vertices: 0, geometry_bytes: 0, bbox: BBox::EMPTY }
+        SceneStats {
+            triangles: 0,
+            vertices: 0,
+            geometry_bytes: 0,
+            bbox: BBox::EMPTY,
+        }
     }
 }
 
@@ -357,8 +371,7 @@ pub fn build_batches(
                 stats.vertices += pts.len();
                 stats.bbox = stats.bbox.union(BBox::from_points(&pts));
                 let closed = c.is_closed();
-                if sel { &mut curve_s } else { &mut curve_n }
-                    .append_strip_as_lines(&pts, closed);
+                if sel { &mut curve_s } else { &mut curve_n }.append_strip_as_lines(&pts, closed);
             }
             SceneGeom::Point(p) => {
                 if p.is_finite() {
@@ -414,7 +427,10 @@ pub struct ViewportShared {
 
 impl ViewportShared {
     pub fn new() -> Arc<Mutex<ViewportShared>> {
-        Arc::new(Mutex::new(ViewportShared { renderer: None, pending: None }))
+        Arc::new(Mutex::new(ViewportShared {
+            renderer: None,
+            pending: None,
+        }))
     }
 }
 
@@ -485,8 +501,14 @@ impl Renderer {
         unsafe {
             let program = gl.create_program()?;
             let sources = [
-                (glow::VERTEX_SHADER, format!("{}{}", shader_prefix(), VERT_SRC)),
-                (glow::FRAGMENT_SHADER, format!("{}{}", shader_prefix(), FRAG_SRC)),
+                (
+                    glow::VERTEX_SHADER,
+                    format!("{}{}", shader_prefix(), VERT_SRC),
+                ),
+                (
+                    glow::FRAGMENT_SHADER,
+                    format!("{}{}", shader_prefix(), FRAG_SRC),
+                ),
             ];
             let mut shaders = Vec::new();
             for (kind, src) in &sources {
@@ -548,14 +570,18 @@ impl Renderer {
             gl.uniform_matrix_4_f32_slice(self.u_mvp.as_ref(), false, mvp);
             gl.uniform_3_f32(self.u_light_dir.as_ref(), 0.35, 0.25, 0.9);
             for b in self.static_batches.iter().chain(self.scene_batches.iter()) {
-                gl.uniform_4_f32(self.u_color.as_ref(), b.color[0], b.color[1], b.color[2], b.color[3]);
+                gl.uniform_4_f32(
+                    self.u_color.as_ref(),
+                    b.color[0],
+                    b.color[1],
+                    b.color[2],
+                    b.color[3],
+                );
                 gl.uniform_1_i32(self.u_shaded.as_ref(), if b.shaded { 1 } else { 0 });
                 gl.uniform_1_f32(self.u_point_size.as_ref(), b.point_size);
                 gl.bind_vertex_array(Some(b.vao));
                 match b.ebo {
-                    Some(_) => {
-                        gl.draw_elements(b.mode, b.draw_count, glow::UNSIGNED_INT, 0)
-                    }
+                    Some(_) => gl.draw_elements(b.mode, b.draw_count, glow::UNSIGNED_INT, 0),
                     None => gl.draw_arrays(b.mode, 0, b.draw_count),
                 }
             }
@@ -607,7 +633,11 @@ fn upload_batches(gl: &glow::Context, batches: &[CpuBatch]) -> Result<Vec<GpuBat
             let vbo = gl.create_buffer()?;
             gl.bind_vertex_array(Some(vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, as_bytes_f32(&b.vertices), glow::STATIC_DRAW);
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                as_bytes_f32(&b.vertices),
+                glow::STATIC_DRAW,
+            );
             let stride = 6 * 4;
             gl.enable_vertex_attrib_array(0);
             gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
@@ -698,7 +728,8 @@ impl ViewportPanel {
             || (response.dragged_by(egui::PointerButton::Primary) && shift)
         {
             let d = response.drag_delta();
-            self.camera.pan(d.x as f64, d.y as f64, rect.height() as f64);
+            self.camera
+                .pan(d.x as f64, d.y as f64, rect.height() as f64);
         } else if response.dragged_by(egui::PointerButton::Primary) {
             let d = response.drag_delta();
             self.camera.orbit(d.x as f64, d.y as f64);
@@ -786,7 +817,12 @@ mod tests {
 
     #[test]
     fn camera_eye_positions() {
-        let mut cam = Camera { target: Vec3::ZERO, distance: 5.0, yaw: 0.0, pitch: 0.0 };
+        let mut cam = Camera {
+            target: Vec3::ZERO,
+            distance: 5.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        };
         assert!((cam.eye() - Vec3::new(5.0, 0.0, 0.0)).length() < EPS);
         cam.yaw = std::f64::consts::FRAC_PI_2;
         assert!((cam.eye() - Vec3::new(0.0, 5.0, 0.0)).length() < EPS);
@@ -840,7 +876,12 @@ mod tests {
 
     #[test]
     fn view_proj_keeps_target_on_axis() {
-        let cam = Camera { target: Vec3::new(3.0, -2.0, 5.0), distance: 8.0, yaw: 1.1, pitch: 0.7 };
+        let cam = Camera {
+            target: Vec3::new(3.0, -2.0, 5.0),
+            distance: 8.0,
+            yaw: 1.1,
+            pitch: 0.7,
+        };
         let m = cam.view_proj(1.7);
         let c = m.transform_point(cam.target);
         assert!(c.x.abs() < 1e-9 && c.y.abs() < 1e-9, "{c:?}");
@@ -879,12 +920,36 @@ mod tests {
     fn collect_scene_recurses_lists_and_honors_preview() {
         let mut doc = Document::new(Identity::generate("t"));
         // slider(count=4) -> series -> point_xyz  ==> List of 4 Vectors
-        doc.apply_op(GraphOp::AddNode { id: nid(1), type_name: "number_slider".into(), pos: (0.0, 0.0) }).unwrap();
-        doc.set_param(nid(1), "value", ParamValue::Number(4.0)).unwrap();
-        doc.apply_op(GraphOp::AddNode { id: nid(2), type_name: "series".into(), pos: (0.0, 0.0) }).unwrap();
-        doc.apply_op(GraphOp::Connect { from: (nid(1), 0), to: (nid(2), 2) }).unwrap();
-        doc.apply_op(GraphOp::AddNode { id: nid(3), type_name: "point_xyz".into(), pos: (0.0, 0.0) }).unwrap();
-        doc.apply_op(GraphOp::Connect { from: (nid(2), 0), to: (nid(3), 0) }).unwrap();
+        doc.apply_op(GraphOp::AddNode {
+            id: nid(1),
+            type_name: "number_slider".into(),
+            pos: (0.0, 0.0),
+        })
+        .unwrap();
+        doc.set_param(nid(1), "value", ParamValue::Number(4.0))
+            .unwrap();
+        doc.apply_op(GraphOp::AddNode {
+            id: nid(2),
+            type_name: "series".into(),
+            pos: (0.0, 0.0),
+        })
+        .unwrap();
+        doc.apply_op(GraphOp::Connect {
+            from: (nid(1), 0),
+            to: (nid(2), 2),
+        })
+        .unwrap();
+        doc.apply_op(GraphOp::AddNode {
+            id: nid(3),
+            type_name: "point_xyz".into(),
+            pos: (0.0, 0.0),
+        })
+        .unwrap();
+        doc.apply_op(GraphOp::Connect {
+            from: (nid(2), 0),
+            to: (nid(3), 0),
+        })
+        .unwrap();
         doc.evaluate();
         let items = collect_scene(doc.display_graph(), &doc.last_eval);
         // point_xyz previews 4 points; nothing else is geometric.
@@ -896,7 +961,8 @@ mod tests {
         assert!(points.iter().all(|i| i.node == nid(3)));
 
         // Turning preview off removes the node's geometry.
-        doc.set_param(nid(3), "__preview", ParamValue::Bool(false)).unwrap();
+        doc.set_param(nid(3), "__preview", ParamValue::Bool(false))
+            .unwrap();
         doc.evaluate();
         let items = collect_scene(doc.display_graph(), &doc.last_eval);
         assert!(items.iter().all(|i| i.node != nid(3)));
@@ -905,10 +971,24 @@ mod tests {
     #[test]
     fn collect_scene_includes_curves_and_meshes() {
         let mut doc = Document::new(Identity::generate("t"));
-        doc.apply_op(GraphOp::AddNode { id: nid(1), type_name: "circle".into(), pos: (0.0, 0.0) }).unwrap();
-        doc.apply_op(GraphOp::AddNode { id: nid(2), type_name: "sphere".into(), pos: (0.0, 0.0) }).unwrap();
+        doc.apply_op(GraphOp::AddNode {
+            id: nid(1),
+            type_name: "circle".into(),
+            pos: (0.0, 0.0),
+        })
+        .unwrap();
+        doc.apply_op(GraphOp::AddNode {
+            id: nid(2),
+            type_name: "sphere".into(),
+            pos: (0.0, 0.0),
+        })
+        .unwrap();
         doc.evaluate();
-        assert!(doc.last_eval.errors.is_empty(), "{:?}", doc.last_eval.errors);
+        assert!(
+            doc.last_eval.errors.is_empty(),
+            "{:?}",
+            doc.last_eval.errors
+        );
         let items = collect_scene(doc.display_graph(), &doc.last_eval);
         assert!(items.iter().any(|i| matches!(i.geom, SceneGeom::Curve(_))));
         assert!(items.iter().any(|i| matches!(i.geom, SceneGeom::Mesh(_))));
@@ -918,18 +998,35 @@ mod tests {
 
     #[test]
     fn build_batches_splits_selection_and_counts() {
-        let mesh = Arc::new(Mesh::box_mesh(&mantis_kernel::Plane::world_xy(), 1.0, 1.0, 1.0));
+        let mesh = Arc::new(Mesh::box_mesh(
+            &mantis_kernel::Plane::world_xy(),
+            1.0,
+            1.0,
+            1.0,
+        ));
         let items = vec![
-            SceneItem { node: nid(1), geom: SceneGeom::Mesh(mesh.clone()) },
-            SceneItem { node: nid(2), geom: SceneGeom::Mesh(mesh) },
-            SceneItem { node: nid(2), geom: SceneGeom::Point(Vec3::ZERO) },
+            SceneItem {
+                node: nid(1),
+                geom: SceneGeom::Mesh(mesh.clone()),
+            },
+            SceneItem {
+                node: nid(2),
+                geom: SceneGeom::Mesh(mesh),
+            },
+            SceneItem {
+                node: nid(2),
+                geom: SceneGeom::Point(Vec3::ZERO),
+            },
         ];
         let sel: BTreeSet<NodeId> = [nid(2)].into_iter().collect();
         let (batches, stats) = build_batches(&items, &sel);
         assert_eq!(stats.triangles, 24);
         // one normal mesh batch, one selected mesh batch, one selected point batch
         assert_eq!(batches.len(), 3);
-        let tri_batches: Vec<_> = batches.iter().filter(|b| b.mode == BatchMode::Triangles).collect();
+        let tri_batches: Vec<_> = batches
+            .iter()
+            .filter(|b| b.mode == BatchMode::Triangles)
+            .collect();
         assert_eq!(tri_batches.len(), 2);
         assert_ne!(tri_batches[0].color, tri_batches[1].color);
         assert!(!stats.bbox.is_empty());
@@ -943,8 +1040,14 @@ mod tests {
 
     #[test]
     fn curve_batches_wrap_closed_curves() {
-        let circle = Arc::new(Curve::Circle { plane: mantis_kernel::Plane::world_xy(), radius: 1.0 });
-        let items = vec![SceneItem { node: nid(1), geom: SceneGeom::Curve(circle) }];
+        let circle = Arc::new(Curve::Circle {
+            plane: mantis_kernel::Plane::world_xy(),
+            radius: 1.0,
+        });
+        let items = vec![SceneItem {
+            node: nid(1),
+            geom: SceneGeom::Curve(circle),
+        }];
         let (batches, _) = build_batches(&items, &BTreeSet::new());
         assert_eq!(batches.len(), 1);
         let b = &batches[0];

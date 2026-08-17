@@ -1,0 +1,34 @@
+name: mantis-cad
+
+services:
+  mantis:
+    image: ${MANTIS_IMAGE:-ghcr.io/tomeido/mantis-cad:latest}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "127.0.0.1:${MANTIS_PORT:-7878}:7878"
+    environment:
+      PORT: "7878"
+      MANTIS_DATA_DIR: /data
+      MANTIS_DIST_DIR: /app/dist
+      MANTIS_OPERATOR_KEYS: ${MANTIS_OPERATOR_KEYS:-}
+      MANTIS_ALLOWED_ORIGINS: ${MANTIS_ALLOWED_ORIGINS:-}
+      MANTIS_MAX_PROJECT_BYTES: ${MANTIS_MAX_PROJECT_BYTES:-25165824}
+    volumes:
+      - mantis-data:/data
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:7878/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mantis-data:

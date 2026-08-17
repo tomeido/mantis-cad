@@ -1,0 +1,7 @@
+services:
+  mantis:
+    image: mantis-cad:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime

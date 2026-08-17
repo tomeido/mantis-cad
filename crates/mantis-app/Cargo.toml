@@ -8,6 +8,7 @@ license.workspace = true
 mantis-kernel = { workspace = true }
 mantis-graph = { workspace = true }
 mantis-chain = { workspace = true }
+mantis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 eframe = { workspace = true, features = ["persistence"] }
@@ -16,11 +17,29 @@ egui_glow = { workspace = true }
 glow = { workspace = true }
 ehttp = { workspace = true }
 getrandom = { workspace = true }
+argon2 = "0.5"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "console"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "console",
+    "Event",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbObjectStore",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "DomStringList",
+] }
 js-sys = "0.3"
 log = "0.4"

@@ -124,9 +124,9 @@ impl GraphOp {
                 pos.0.is_finite() && pos.1.is_finite()
             }
             GraphOp::SetParam { value, .. } => value.is_finite(),
-            GraphOp::RemoveNode { .. }
-            | GraphOp::Connect { .. }
-            | GraphOp::Disconnect { .. } => true,
+            GraphOp::RemoveNode { .. } | GraphOp::Connect { .. } | GraphOp::Disconnect { .. } => {
+                true
+            }
         }
     }
 
@@ -235,7 +235,10 @@ impl Graph {
                 }
                 // an input port holds one wire: replace
                 self.edges.retain(|e| e.to != *to);
-                self.edges.push(Edge { from: *from, to: *to });
+                self.edges.push(Edge {
+                    from: *from,
+                    to: *to,
+                });
                 Ok(())
             }
             GraphOp::Disconnect { from, to } => {
@@ -314,8 +317,7 @@ impl Graph {
     /// Deterministic topological order (Kahn; ties by ascending NodeId).
     /// Nodes in cycles are omitted (cannot happen via `apply`, but be safe).
     pub fn topo_order(&self) -> Vec<NodeId> {
-        let mut indeg: BTreeMap<NodeId, usize> =
-            self.nodes.keys().map(|id| (*id, 0)).collect();
+        let mut indeg: BTreeMap<NodeId, usize> = self.nodes.keys().map(|id| (*id, 0)).collect();
         for e in &self.edges {
             if let Some(d) = indeg.get_mut(&e.to.0) {
                 if self.nodes.contains_key(&e.from.0) {
@@ -373,22 +375,40 @@ mod tests {
     fn connect_replaces_input_wire_and_blocks_cycles() {
         let mut g = Graph::new();
         for i in 1..=3u128 {
-            g.apply(&GraphOp::AddNode { id: nid(i), type_name: "t".into(), pos: (0.0, 0.0) })
-                .unwrap();
+            g.apply(&GraphOp::AddNode {
+                id: nid(i),
+                type_name: "t".into(),
+                pos: (0.0, 0.0),
+            })
+            .unwrap();
         }
-        g.apply(&GraphOp::Connect { from: (nid(1), 0), to: (nid(3), 0) }).unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(1), 0),
+            to: (nid(3), 0),
+        })
+        .unwrap();
         // replacing the same input with a wire from node 2
-        g.apply(&GraphOp::Connect { from: (nid(2), 0), to: (nid(3), 0) }).unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(2), 0),
+            to: (nid(3), 0),
+        })
+        .unwrap();
         assert_eq!(g.edges.len(), 1);
         assert_eq!(g.incoming((nid(3), 0)).unwrap().from.0, nid(2));
         // 3 -> 2 would close a cycle 2 -> 3 -> 2
         assert_eq!(
-            g.apply(&GraphOp::Connect { from: (nid(3), 0), to: (nid(2), 0) }),
+            g.apply(&GraphOp::Connect {
+                from: (nid(3), 0),
+                to: (nid(2), 0)
+            }),
             Err(GraphError::Cycle)
         );
         // self loop
         assert_eq!(
-            g.apply(&GraphOp::Connect { from: (nid(2), 1), to: (nid(2), 0) }),
+            g.apply(&GraphOp::Connect {
+                from: (nid(2), 1),
+                to: (nid(2), 0)
+            }),
             Err(GraphError::SelfLoop)
         );
     }
@@ -397,11 +417,23 @@ mod tests {
     fn remove_node_drops_incident_edges() {
         let mut g = Graph::new();
         for i in 1..=3u128 {
-            g.apply(&GraphOp::AddNode { id: nid(i), type_name: "t".into(), pos: (0.0, 0.0) })
-                .unwrap();
+            g.apply(&GraphOp::AddNode {
+                id: nid(i),
+                type_name: "t".into(),
+                pos: (0.0, 0.0),
+            })
+            .unwrap();
         }
-        g.apply(&GraphOp::Connect { from: (nid(1), 0), to: (nid(2), 0) }).unwrap();
-        g.apply(&GraphOp::Connect { from: (nid(2), 0), to: (nid(3), 0) }).unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(1), 0),
+            to: (nid(2), 0),
+        })
+        .unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(2), 0),
+            to: (nid(3), 0),
+        })
+        .unwrap();
         g.apply(&GraphOp::RemoveNode { id: nid(2) }).unwrap();
         assert!(g.edges.is_empty());
     }
@@ -410,10 +442,18 @@ mod tests {
     fn topo_order_deterministic() {
         let mut g = Graph::new();
         for i in [5u128, 3, 9, 1] {
-            g.apply(&GraphOp::AddNode { id: nid(i), type_name: "t".into(), pos: (0.0, 0.0) })
-                .unwrap();
+            g.apply(&GraphOp::AddNode {
+                id: nid(i),
+                type_name: "t".into(),
+                pos: (0.0, 0.0),
+            })
+            .unwrap();
         }
-        g.apply(&GraphOp::Connect { from: (nid(9), 0), to: (nid(1), 0) }).unwrap();
+        g.apply(&GraphOp::Connect {
+            from: (nid(9), 0),
+            to: (nid(1), 0),
+        })
+        .unwrap();
         let order = g.topo_order();
         assert_eq!(order.len(), 4);
         // sources in ascending id order, 1 after 9

@@ -2,6 +2,11 @@
 //!
 //! Subcommands:
 //!   keygen --name NAME [--out FILE]      generate a signing identity
+//!   init FILE                             create an empty chain document
+//!   catalog [--json]                     discover component/port metadata
+//!   apply FILE --ops OPS --identity ID   validate + sign an atomic edit batch
+//!   graph FILE [--json]                  inspect the materialized graph
+//!   audit FILE                           provenance + anchor checkpoint JSON
 //!   inspect FILE                         table of blocks in a chain file
 //!   verify FILE                          full chain validation
 //!   replay FILE [--upto N] [--obj OUT]   replay ops -> graph -> meshes
@@ -10,16 +15,26 @@
 //! The CLI is a UI edge: reading the clock (`demo` timestamps) and OS
 //! randomness (`keygen`) are allowed here — never inside the libraries.
 
+mod agent;
 mod demo;
 mod replay;
 
 use mantis_chain::{Chain, Identity};
+use std::io::Write;
 
 const USAGE: &str = "mantis-cli — headless MantisCAD tools
 
 USAGE:
   mantis-cli keygen --name NAME [--out FILE]   generate identity JSON
                                                {\"name\":..,\"secret\":hex,\"public\":hex}
+  mantis-cli init FILE                         create a genesis-only chain
+  mantis-cli catalog [--json]                  component, port, and parameter schema
+  mantis-cli apply FILE --ops OPS.json --identity ID.json --message TEXT
+                    [--out FILE] [--timestamp MS] [--dry-run] [--allow-errors]
+                                               validate, evaluate, sign, and atomically
+                                               commit one GraphOp batch
+  mantis-cli graph FILE [--upto N] [--json]    materialized graph + evaluation results
+  mantis-cli audit FILE                         verified provenance + head checkpoint JSON
   mantis-cli inspect FILE                      list blocks (idx, author, ops, bytes)
   mantis-cli verify FILE                       validate chain, print OK or the error
   mantis-cli replay FILE [--upto N] [--obj OUT.obj]
@@ -29,16 +44,16 @@ USAGE:
 
 /// CLI failure: usage errors exit 2, runtime errors exit 1.
 #[derive(Debug, PartialEq)]
-enum CliError {
+pub(crate) enum CliError {
     Usage(String),
     Runtime(String),
 }
 
 impl CliError {
-    fn usage(msg: impl Into<String>) -> CliError {
+    pub(crate) fn usage(msg: impl Into<String>) -> CliError {
         CliError::Usage(msg.into())
     }
-    fn runtime(msg: impl Into<String>) -> CliError {
+    pub(crate) fn runtime(msg: impl Into<String>) -> CliError {
         CliError::Runtime(msg.into())
     }
 }
@@ -66,21 +81,28 @@ fn dispatch(args: &[String]) -> Result<String, CliError> {
     let rest = &args[1..];
     match cmd.as_str() {
         "keygen" => cmd_keygen(rest),
+        "init" => agent::cmd_init(rest),
+        "catalog" => agent::cmd_catalog(rest),
+        "apply" => agent::cmd_apply(rest),
+        "graph" => agent::cmd_graph(rest),
+        "audit" => agent::cmd_audit(rest),
         "inspect" => cmd_inspect(rest),
         "verify" => cmd_verify(rest),
         "replay" => cmd_replay(rest),
         "demo" => cmd_demo(rest),
         "-h" | "--help" | "help" => Err(CliError::usage(USAGE)),
-        other => Err(CliError::usage(format!("unknown subcommand: {other}\n\n{USAGE}"))),
+        other => Err(CliError::usage(format!(
+            "unknown subcommand: {other}\n\n{USAGE}"
+        ))),
     }
 }
 
 /// Load + validate a chain file (Chain::from_json validates fully).
-fn load_chain(path: &str) -> Result<Chain, CliError> {
+pub(crate) fn load_chain(path: &str) -> Result<Chain, CliError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| CliError::runtime(format!("cannot read {path}: {e}")))?;
     Chain::from_json(&text)
-        .map_err(|e| CliError::runtime(format!("invalid chain in {path}: {e}")))
+        .map_err(|e| CliError::runtime(format!("invalid chain in {path}: [{}] {e}", e.code())))
 }
 
 // ---------------------------------------------------------------------------
@@ -97,14 +119,42 @@ fn keygen_json(identity: &Identity) -> String {
     )
 }
 
+/// Identity files contain an Ed25519 secret. Create them exclusively (never
+/// overwrite an existing key) and with owner-only permissions on Unix.
+fn write_identity_file(path: &str, json: &str) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(json.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()
+}
+
 fn cmd_keygen(args: &[String]) -> Result<String, CliError> {
     let mut name: Option<String> = None;
     let mut out: Option<String> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--name" => name = Some(it.next().ok_or(CliError::usage("--name needs a value"))?.clone()),
-            "--out" => out = Some(it.next().ok_or(CliError::usage("--out needs a value"))?.clone()),
+            "--name" => {
+                name = Some(
+                    it.next()
+                        .ok_or(CliError::usage("--name needs a value"))?
+                        .clone(),
+                )
+            }
+            "--out" => {
+                out = Some(
+                    it.next()
+                        .ok_or(CliError::usage("--out needs a value"))?
+                        .clone(),
+                )
+            }
             other => return Err(CliError::usage(format!("keygen: unknown argument {other}"))),
         }
     }
@@ -113,7 +163,7 @@ fn cmd_keygen(args: &[String]) -> Result<String, CliError> {
     let json = keygen_json(&identity);
     match out {
         Some(path) => {
-            std::fs::write(&path, format!("{json}\n"))
+            write_identity_file(&path, &json)
                 .map_err(|e| CliError::runtime(format!("cannot write {path}: {e}")))?;
             Ok(format!("wrote {path} (public {})\n", identity.public_hex()))
         }
@@ -180,14 +230,22 @@ fn cmd_replay(args: &[String]) -> Result<String, CliError> {
                         .map_err(|_| CliError::usage(format!("invalid --upto: {v}")))?,
                 );
             }
-            "--obj" => obj = Some(it.next().ok_or(CliError::usage("--obj needs a value"))?.clone()),
+            "--obj" => {
+                obj = Some(
+                    it.next()
+                        .ok_or(CliError::usage("--obj needs a value"))?
+                        .clone(),
+                )
+            }
             other if path.is_none() && !other.starts_with("--") => {
                 path = Some(other.to_string());
             }
             other => return Err(CliError::usage(format!("replay: unknown argument {other}"))),
         }
     }
-    let path = path.ok_or(CliError::usage("usage: mantis-cli replay FILE [--upto N] [--obj OUT.obj]"))?;
+    let path = path.ok_or(CliError::usage(
+        "usage: mantis-cli replay FILE [--upto N] [--obj OUT.obj]",
+    ))?;
 
     let chain = load_chain(&path)?;
     let report = replay::replay_report(&chain, upto).map_err(CliError::runtime)?;
@@ -226,7 +284,7 @@ fn cmd_replay(args: &[String]) -> Result<String, CliError> {
 
 /// Milliseconds since the Unix epoch. Clock reads are allowed at the CLI
 /// edge; timestamps land inside blocks, never inside graph evaluation.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -238,7 +296,12 @@ fn cmd_demo(args: &[String]) -> Result<String, CliError> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--out" => out = it.next().ok_or(CliError::usage("--out needs a value"))?.clone(),
+            "--out" => {
+                out = it
+                    .next()
+                    .ok_or(CliError::usage("--out needs a value"))?
+                    .clone()
+            }
             other => return Err(CliError::usage(format!("demo: unknown argument {other}"))),
         }
     }
@@ -316,14 +379,36 @@ mod tests {
         assert_eq!(v["name"], "dave");
 
         let path = temp_path("id.json");
-        let msg = dispatch(&args(&["keygen", "--name", "dave", "--out", path.to_str().unwrap()]))
-            .unwrap();
+        let msg = dispatch(&args(&[
+            "keygen",
+            "--name",
+            "dave",
+            "--out",
+            path.to_str().unwrap(),
+        ]))
+        .unwrap();
         assert!(msg.contains("wrote"), "{msg}");
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let restored =
             Identity::from_secret_hex("dave", saved["secret"].as_str().unwrap()).unwrap();
         assert_eq!(restored.public_hex(), saved["public"].as_str().unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "identity secret must be owner-only");
+        }
+        assert!(matches!(
+            dispatch(&args(&[
+                "keygen",
+                "--name",
+                "replacement",
+                "--out",
+                path.to_str().unwrap()
+            ])),
+            Err(CliError::Runtime(_))
+        ));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -378,7 +463,10 @@ mod tests {
         // 12 nodes in the demo graph, one line each
         assert_eq!(report.node_lines.len(), 12);
         assert!(
-            report.node_lines.iter().any(|l| l.contains("loft") && l.contains("Mesh")),
+            report
+                .node_lines
+                .iter()
+                .any(|l| l.contains("loft") && l.contains("Mesh")),
             "loft line missing mesh: {:?}",
             report.node_lines
         );
@@ -391,7 +479,11 @@ mod tests {
         let chain = demo_chain();
         let report = replay::replay_report(&chain, None).unwrap();
         let obj = report.mesh.to_obj();
-        assert!(obj.starts_with("v "), "OBJ starts: {:?}", &obj[..obj.len().min(40)]);
+        assert!(
+            obj.starts_with("v "),
+            "OBJ starts: {:?}",
+            &obj[..obj.len().min(40)]
+        );
         assert!(obj.contains("\nvn "), "has normals");
         assert!(obj.contains("\nf "), "has faces");
         let f_lines = obj.lines().filter(|l| l.starts_with("f ")).count();
@@ -471,7 +563,7 @@ mod tests {
         let evil = chain.to_json().replace("tower profile", "TOWER PROFILE");
         std::fs::write(&path, evil).unwrap();
         match dispatch(&args(&["verify", path.to_str().unwrap()])) {
-            Err(CliError::Runtime(msg)) => assert!(msg.contains("BadHash"), "{msg}"),
+            Err(CliError::Runtime(msg)) => assert!(msg.contains("[bad_hash]"), "{msg}"),
             other => panic!("expected runtime error, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
@@ -497,6 +589,9 @@ mod tests {
             dispatch(&args(&["frobnicate"])),
             Err(CliError::Usage(_))
         ));
-        assert!(matches!(dispatch(&args(&["--help"])), Err(CliError::Usage(_))));
+        assert!(matches!(
+            dispatch(&args(&["--help"])),
+            Err(CliError::Usage(_))
+        ));
     }
 }

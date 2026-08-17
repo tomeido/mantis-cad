@@ -1,0 +1,15 @@
+.git
+.github
+.trunk
+.env
+.env.*
+target
+dist
+*.identity.json
+*.mantis-key
+*.export.json
+*.mantis-tmp-*
+mantis-chain.json
+mantis-data
+**/.DS_Store
+docs

@@ -1,4 +1,9 @@
 /target
 dist/
+/mantis-data/
 *.identity.json
+*.mantis-key
+.env
+.env.*
+.*.mantis-tmp-*
 .trunk/

@@ -87,10 +87,10 @@ pub struct ViewXf {
 }
 
 impl ViewXf {
-    pub fn to_screen(&self, world: egui::Pos2) -> egui::Pos2 {
+    pub fn to_screen(self, world: egui::Pos2) -> egui::Pos2 {
         self.origin + self.pan + world.to_vec2() * self.zoom
     }
-    pub fn to_world(&self, screen: egui::Pos2) -> egui::Pos2 {
+    pub fn to_world(self, screen: egui::Pos2) -> egui::Pos2 {
         (((screen - self.origin) - self.pan) / self.zoom).to_pos2()
     }
 }
@@ -117,9 +117,19 @@ pub fn zoom_at(
 #[derive(Clone)]
 enum BodyWidget {
     None,
-    Slider { value: f64, min: f64, max: f64, step: f64 },
-    Toggle { value: bool },
-    Panel { display: Option<String>, text: String },
+    Slider {
+        value: f64,
+        min: f64,
+        max: f64,
+        step: f64,
+    },
+    Toggle {
+        value: bool,
+    },
+    Panel {
+        display: Option<String>,
+        text: String,
+    },
 }
 
 fn widget_height(w: &BodyWidget) -> f32 {
@@ -218,14 +228,23 @@ impl NodeEditor {
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll.abs() > 0.1 {
                 if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
-                    let (p, z) =
-                        zoom_at(self.pan, self.zoom, rect.min, cursor, (scroll * 0.0035).exp());
+                    let (p, z) = zoom_at(
+                        self.pan,
+                        self.zoom,
+                        rect.min,
+                        cursor,
+                        (scroll * 0.0035).exp(),
+                    );
                     self.pan = p;
                     self.zoom = z;
                 }
             }
         }
-        let xf = ViewXf { origin: rect.min, pan: self.pan, zoom: self.zoom };
+        let xf = ViewXf {
+            origin: rect.min,
+            pan: self.pan,
+            zoom: self.zoom,
+        };
         let z = self.zoom;
 
         // ---- background ---------------------------------------------------
@@ -275,11 +294,15 @@ impl NodeEditor {
         // ---- nodes ----------------------------------------------------------
         let shift = ui.input(|i| i.modifiers.shift);
         for l in &layouts {
-            self.node_ui(ui, &painter, doc, l, &layouts, &index, &edges, shift, editable, errors);
+            self.node_ui(
+                ui, &painter, doc, l, &layouts, &index, &edges, shift, editable, errors,
+            );
         }
 
         // ---- ghost wire / wire release ---------------------------------------
-        self.wire_drag_ui(ui, &painter, doc, &layouts, &index, wire_w, editable, errors);
+        self.wire_drag_ui(
+            ui, &painter, doc, &layouts, &index, wire_w, editable, errors,
+        );
 
         // ---- keyboard -----------------------------------------------------
         self.keyboard(ui, doc, errors, editable);
@@ -308,7 +331,7 @@ impl NodeEditor {
         painter.text(
             rect.left_bottom() + egui::vec2(8.0, -6.0),
             egui::Align2::LEFT_BOTTOM,
-            "right-click add · drag ports to wire · Del remove · Esc deselect · scroll zoom",
+            "right-click add · drag ports to wire · Del remove · Ctrl/Cmd+Z undo · scroll zoom",
             egui::FontId::proportional(10.5),
             egui::Color32::from_rgb(0x6e, 0x76, 0x82),
         );
@@ -406,9 +429,19 @@ impl NodeEditor {
 
         // -- body / title chrome --
         let rounding = egui::CornerRadius::same((6.0 * z).clamp(2.0, 8.0) as u8);
-        painter.rect_filled(l.rect, rounding, if resp.hovered() { NODE_BODY_HOVER } else { NODE_BODY });
-        let title_rect =
-            egui::Rect::from_min_max(l.rect.min, egui::pos2(l.rect.max.x, l.rect.min.y + TITLE_H * z));
+        painter.rect_filled(
+            l.rect,
+            rounding,
+            if resp.hovered() {
+                NODE_BODY_HOVER
+            } else {
+                NODE_BODY
+            },
+        );
+        let title_rect = egui::Rect::from_min_max(
+            l.rect.min,
+            egui::pos2(l.rect.max.x, l.rect.min.y + TITLE_H * z),
+        );
         painter.rect_filled(title_rect, rounding, NODE_TITLE);
         let strip = egui::Rect::from_min_max(
             title_rect.min,
@@ -422,7 +455,12 @@ impl NodeEditor {
         } else {
             (NODE_OUTLINE, 1.0)
         };
-        painter.rect_stroke(l.rect, rounding, egui::Stroke::new(ow, oc), egui::StrokeKind::Outside);
+        painter.rect_stroke(
+            l.rect,
+            rounding,
+            egui::Stroke::new(ow, oc),
+            egui::StrokeKind::Outside,
+        );
         if z >= 0.4 {
             painter.text(
                 egui::pos2(strip.max.x + 5.0 * z, title_rect.center().y),
@@ -448,7 +486,11 @@ impl NodeEditor {
         let eye_rect = egui::Rect::from_center_size(eye_c, egui::vec2(13.0, 13.0) * z.max(0.7));
         let er = ui
             .interact(eye_rect, base_id.with("eye"), egui::Sense::click())
-            .on_hover_text(if l.preview { "preview: on" } else { "preview: off" });
+            .on_hover_text(if l.preview {
+                "preview: on"
+            } else {
+                "preview: off"
+            });
         if er.clicked() && editable {
             if let Err(e) = doc.set_param(l.id, "__preview", ParamValue::Bool(!l.preview)) {
                 errors.push(e);
@@ -462,7 +504,11 @@ impl NodeEditor {
         painter.circle(
             eye_c,
             (3.5 * z).max(2.0),
-            if l.preview { eye_col } else { egui::Color32::TRANSPARENT },
+            if l.preview {
+                eye_col
+            } else {
+                egui::Color32::TRANSPARENT
+            },
             egui::Stroke::new(1.0, eye_col),
         );
 
@@ -478,8 +524,17 @@ impl NodeEditor {
                     egui::Sense::click_and_drag(),
                 )
                 .on_hover_text(format!("{} · {:?}", pin.name, pin.kind));
-            let r = if pr.hovered() { PORT_R * z * 1.4 } else { PORT_R * z };
-            painter.circle(pin.pos, r.max(2.5), kind_color(pin.kind), egui::Stroke::new(1.0, NODE_OUTLINE));
+            let r = if pr.hovered() {
+                PORT_R * z * 1.4
+            } else {
+                PORT_R * z
+            };
+            painter.circle(
+                pin.pos,
+                r.max(2.5),
+                kind_color(pin.kind),
+                egui::Stroke::new(1.0, NODE_OUTLINE),
+            );
             if show_names {
                 painter.text(
                     pin.pos + egui::vec2(9.0 * z, 0.0),
@@ -492,14 +547,20 @@ impl NodeEditor {
             // Grabbing a wired input detaches its wire and re-drags it.
             if editable && pr.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(edge) = edges.iter().find(|e| e.to == (l.id, i as u16)).copied() {
-                    match doc.apply_op(GraphOp::Disconnect { from: edge.from, to: edge.to }) {
+                    match doc.apply_op(GraphOp::Disconnect {
+                        from: edge.from,
+                        to: edge.to,
+                    }) {
                         Ok(()) => {
                             let kind = index
                                 .get(&edge.from.0)
                                 .and_then(|&fi| layouts[fi].outs.get(edge.from.1 as usize))
                                 .map(|p| p.kind)
                                 .unwrap_or(ValueKind::Any);
-                            self.wire_drag = Some(WireDrag { from: edge.from, kind });
+                            self.wire_drag = Some(WireDrag {
+                                from: edge.from,
+                                kind,
+                            });
                         }
                         Err(e) => errors.push(e),
                     }
@@ -514,8 +575,17 @@ impl NodeEditor {
                     egui::Sense::click_and_drag(),
                 )
                 .on_hover_text(format!("{} · {:?}", pin.name, pin.kind));
-            let r = if pr.hovered() { PORT_R * z * 1.4 } else { PORT_R * z };
-            painter.circle(pin.pos, r.max(2.5), kind_color(pin.kind), egui::Stroke::new(1.0, NODE_OUTLINE));
+            let r = if pr.hovered() {
+                PORT_R * z * 1.4
+            } else {
+                PORT_R * z
+            };
+            painter.circle(
+                pin.pos,
+                r.max(2.5),
+                kind_color(pin.kind),
+                egui::Stroke::new(1.0, NODE_OUTLINE),
+            );
             if show_names {
                 painter.text(
                     pin.pos - egui::vec2(9.0 * z, 0.0),
@@ -526,7 +596,10 @@ impl NodeEditor {
                 );
             }
             if editable && pr.drag_started_by(egui::PointerButton::Primary) {
-                self.wire_drag = Some(WireDrag { from: (l.id, j as u16), kind: pin.kind });
+                self.wire_drag = Some(WireDrag {
+                    from: (l.id, j as u16),
+                    kind: pin.kind,
+                });
             }
         }
 
@@ -559,7 +632,12 @@ impl NodeEditor {
             .max_rect(painter.clip_rect());
         ui.scope_builder(scope, |ui| match l.widget.clone() {
             BodyWidget::None => {}
-            BodyWidget::Slider { mut value, mut min, mut max, step } => {
+            BodyWidget::Slider {
+                mut value,
+                mut min,
+                mut max,
+                step,
+            } => {
                 if !editable {
                     painter.text(
                         wr.left_center(),
@@ -584,10 +662,8 @@ impl NodeEditor {
                 if sr.drag_stopped() || sr.lost_focus() {
                     doc.end_param_drag();
                 }
-                let m_rect = egui::Rect::from_min_max(
-                    egui::pos2(wr.min.x, wr.min.y + sh + 2.0),
-                    wr.max,
-                );
+                let m_rect =
+                    egui::Rect::from_min_max(egui::pos2(wr.min.x, wr.min.y + sh + 2.0), wr.max);
                 let half = m_rect.width() * 0.5;
                 let mn_rect =
                     egui::Rect::from_min_size(m_rect.min, egui::vec2(half - 2.0, m_rect.height()));
@@ -632,7 +708,12 @@ impl NodeEditor {
                     return;
                 }
                 let label = if value { "true" } else { "false" };
-                let cr = put_at(ui, (l.id.0, "toggle"), wr, egui::Checkbox::new(&mut value, label));
+                let cr = put_at(
+                    ui,
+                    (l.id.0, "toggle"),
+                    wr,
+                    egui::Checkbox::new(&mut value, label),
+                );
                 if cr.changed() {
                     if let Err(e) = doc.set_param(l.id, "value", ParamValue::Bool(value)) {
                         errors.push(e);
@@ -654,8 +735,12 @@ impl NodeEditor {
                     }
                     None => {
                         if editable {
-                            let tr =
-                                put_at(ui, (l.id.0, "text"), wr, egui::TextEdit::singleline(&mut text));
+                            let tr = put_at(
+                                ui,
+                                (l.id.0, "text"),
+                                wr,
+                                egui::TextEdit::singleline(&mut text),
+                            );
                             if tr.changed() {
                                 doc.param_drag(l.id, "text", ParamValue::Text(text));
                             }
@@ -719,9 +804,10 @@ impl NodeEditor {
             if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
                 if let Some((nid, pi, k, _)) = nearest_in_port(layouts, ptr, snap) {
                     if kinds_compatible(wd.kind, k) {
-                        if let Err(e) =
-                            doc.apply_op(GraphOp::Connect { from: wd.from, to: (nid, pi) })
-                        {
+                        if let Err(e) = doc.apply_op(GraphOp::Connect {
+                            from: wd.from,
+                            to: (nid, pi),
+                        }) {
                             errors.push(e);
                         }
                     }
@@ -747,16 +833,17 @@ impl NodeEditor {
             }
         }
         if editable && !ui.ctx().wants_keyboard_input() && !self.selection.is_empty() {
-            let del = ui.input(|i| {
-                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
-            });
+            let del = ui
+                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
             if del {
                 let ids: Vec<NodeId> = self.selection.iter().copied().collect();
                 self.selection.clear();
-                for id in ids {
-                    if let Err(e) = doc.apply_op(GraphOp::RemoveNode { id }) {
-                        errors.push(e);
-                    }
+                let ops = ids
+                    .into_iter()
+                    .map(|id| GraphOp::RemoveNode { id })
+                    .collect();
+                if let Err(e) = doc.apply_ops(ops) {
+                    errors.push(e);
                 }
             }
         }
@@ -781,36 +868,40 @@ impl NodeEditor {
                             sr.request_focus();
                         }
                         let q = menu.search.trim().to_lowercase();
-                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                            let mut by_cat: BTreeMap<&'static str, Vec<(&'static str, &'static str)>> =
-                                BTreeMap::new();
-                            for c in doc.registry.iter() {
-                                let hit = q.is_empty()
-                                    || c.label().to_lowercase().contains(&q)
-                                    || c.type_name().contains(&q)
-                                    || c.category().to_lowercase().contains(&q);
-                                if hit {
-                                    by_cat
-                                        .entry(c.category())
-                                        .or_default()
-                                        .push((c.type_name(), c.label()));
-                                }
-                            }
-                            if by_cat.is_empty() {
-                                ui.weak("no matching component");
-                            }
-                            for (cat, comps) in by_cat {
-                                ui.label(
-                                    egui::RichText::new(cat).small().color(category_color(cat)),
-                                );
-                                for (type_name, label) in comps {
-                                    if ui.selectable_label(false, label).clicked() {
-                                        add = Some(type_name.to_string());
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                let mut by_cat: BTreeMap<
+                                    &'static str,
+                                    Vec<(&'static str, &'static str)>,
+                                > = BTreeMap::new();
+                                for c in doc.registry.iter() {
+                                    let hit = q.is_empty()
+                                        || c.label().to_lowercase().contains(&q)
+                                        || c.type_name().contains(&q)
+                                        || c.category().to_lowercase().contains(&q);
+                                    if hit {
+                                        by_cat
+                                            .entry(c.category())
+                                            .or_default()
+                                            .push((c.type_name(), c.label()));
                                     }
                                 }
-                                ui.add_space(4.0);
-                            }
-                        });
+                                if by_cat.is_empty() {
+                                    ui.weak("no matching component");
+                                }
+                                for (cat, comps) in by_cat {
+                                    ui.label(
+                                        egui::RichText::new(cat).small().color(category_color(cat)),
+                                    );
+                                    for (type_name, label) in comps {
+                                        if ui.selectable_label(false, label).clicked() {
+                                            add = Some(type_name.to_string());
+                                        }
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                            });
                     });
                 });
             if !just_opened
@@ -823,7 +914,11 @@ impl NodeEditor {
         if let Some(type_name) = add {
             if let Some(menu) = &self.add_menu {
                 let id = new_node_id();
-                match doc.apply_op(GraphOp::AddNode { id, type_name, pos: menu.world }) {
+                match doc.apply_op(GraphOp::AddNode {
+                    id,
+                    type_name,
+                    pos: menu.world,
+                }) {
                     Ok(()) => {
                         self.selection.clear();
                         self.selection.insert(id);
@@ -861,13 +956,21 @@ fn put_at(
         egui::UiBuilder::new()
             .id_salt(id_salt)
             .max_rect(rect)
-            .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)),
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::TopDown,
+            )),
     );
     child.add(widget)
 }
 
 /// Cubic bezier with horizontal tangents between two port positions.
-fn draw_wire(painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2, color: egui::Color32, width: f32) {
+fn draw_wire(
+    painter: &egui::Painter,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    color: egui::Color32,
+    width: f32,
+) {
     let dx = ((b.x - a.x).abs() * 0.5).max(30.0);
     let shape = egui::epaint::CubicBezierShape::from_points_stroke(
         [a, a + egui::vec2(dx, 0.0), b - egui::vec2(dx, 0.0), b],
@@ -888,7 +991,7 @@ fn nearest_in_port(
     for l in layouts {
         for (i, pin) in l.ins.iter().enumerate() {
             let d = pin.pos.distance(p);
-            if d <= max_dist && best.map_or(true, |(bd, ..)| d < bd) {
+            if d <= max_dist && best.is_none_or(|(bd, ..)| d < bd) {
                 best = Some((d, l.id, i as u16, pin.kind, pin.pos));
             }
         }
@@ -910,10 +1013,18 @@ fn build_layouts(doc: &Document, xf: &ViewXf) -> Vec<Layout> {
                 c.inputs(),
                 c.outputs(),
             ),
-            None => (format!("? {}", node.type_name), "?".to_string(), Vec::new(), Vec::new()),
+            None => (
+                format!("? {}", node.type_name),
+                "?".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
         };
         let pnum = |key: &str, default: f64| {
-            node.params.get(key).and_then(|p| p.as_number()).unwrap_or(default)
+            node.params
+                .get(key)
+                .and_then(|p| p.as_number())
+                .unwrap_or(default)
         };
         let widget = match node.type_name.as_str() {
             "number_slider" => BodyWidget::Slider {
@@ -923,7 +1034,11 @@ fn build_layouts(doc: &Document, xf: &ViewXf) -> Vec<Layout> {
                 step: pnum("step", 0.0),
             },
             "bool_toggle" => BodyWidget::Toggle {
-                value: node.params.get("value").and_then(|p| p.as_bool()).unwrap_or(false),
+                value: node
+                    .params
+                    .get("value")
+                    .and_then(|p| p.as_bool())
+                    .unwrap_or(false),
             },
             "panel" => {
                 let display = graph.incoming((*id, 0)).and_then(|e| {
@@ -945,19 +1060,28 @@ fn build_layouts(doc: &Document, xf: &ViewXf) -> Vec<Layout> {
         let extra = widget_height(&widget);
         let h = TITLE_H + rows as f32 * ROW_H + extra + if extra > 0.0 { 10.0 } else { 4.0 };
         let world_min = egui::pos2(node.pos.0, node.pos.1);
-        let rect = egui::Rect::from_min_size(xf.to_screen(world_min), egui::vec2(NODE_W, h) * xf.zoom);
+        let rect =
+            egui::Rect::from_min_size(xf.to_screen(world_min), egui::vec2(NODE_W, h) * xf.zoom);
         let pin_at = |x: f32, i: usize| {
             xf.to_screen(world_min + egui::vec2(x, TITLE_H + (i as f32 + 0.5) * ROW_H))
         };
         let ins = in_specs
             .iter()
             .enumerate()
-            .map(|(i, s)| PortPin { pos: pin_at(0.0, i), name: s.name.to_string(), kind: s.ty })
+            .map(|(i, s)| PortPin {
+                pos: pin_at(0.0, i),
+                name: s.name.to_string(),
+                kind: s.ty,
+            })
             .collect();
         let outs = out_specs
             .iter()
             .enumerate()
-            .map(|(i, s)| PortPin { pos: pin_at(NODE_W, i), name: s.name.to_string(), kind: s.ty })
+            .map(|(i, s)| PortPin {
+                pos: pin_at(NODE_W, i),
+                name: s.name.to_string(),
+                kind: s.ty,
+            })
             .collect();
         let widget_rect = egui::Rect::from_min_size(
             xf.to_screen(world_min + egui::vec2(8.0, TITLE_H + rows as f32 * ROW_H + 4.0)),
@@ -989,7 +1113,11 @@ mod tests {
 
     #[test]
     fn view_transform_round_trip() {
-        let xf = ViewXf { origin: egui::pos2(10.0, 20.0), pan: egui::vec2(33.0, -7.0), zoom: 1.7 };
+        let xf = ViewXf {
+            origin: egui::pos2(10.0, 20.0),
+            pan: egui::vec2(33.0, -7.0),
+            zoom: 1.7,
+        };
         let w = egui::pos2(120.5, -44.25);
         let s = xf.to_screen(w);
         let back = xf.to_world(s);
@@ -1005,7 +1133,11 @@ mod tests {
         let before = ViewXf { origin, pan, zoom };
         let world = before.to_world(cursor);
         let (p2, z2) = zoom_at(pan, zoom, origin, cursor, 1.5);
-        let after = ViewXf { origin, pan: p2, zoom: z2 };
+        let after = ViewXf {
+            origin,
+            pan: p2,
+            zoom: z2,
+        };
         let s = after.to_screen(world);
         assert!((s - cursor).length() < 1e-2, "{s:?} vs {cursor:?}");
         assert!((z2 - 1.5).abs() < 1e-6);
@@ -1013,9 +1145,21 @@ mod tests {
 
     #[test]
     fn zoom_clamped() {
-        let (_, z) = zoom_at(egui::Vec2::ZERO, 1.0, egui::Pos2::ZERO, egui::Pos2::ZERO, 100.0);
+        let (_, z) = zoom_at(
+            egui::Vec2::ZERO,
+            1.0,
+            egui::Pos2::ZERO,
+            egui::Pos2::ZERO,
+            100.0,
+        );
         assert_eq!(z, MAX_ZOOM);
-        let (_, z) = zoom_at(egui::Vec2::ZERO, 1.0, egui::Pos2::ZERO, egui::Pos2::ZERO, 0.0001);
+        let (_, z) = zoom_at(
+            egui::Vec2::ZERO,
+            1.0,
+            egui::Pos2::ZERO,
+            egui::Pos2::ZERO,
+            0.0001,
+        );
         assert_eq!(z, MIN_ZOOM);
     }
 
@@ -1067,21 +1211,28 @@ mod tests {
             pos: (300.0, 60.0),
         })
         .unwrap();
-        doc.apply_op(GraphOp::Connect { from: (NodeId(1), 0), to: (NodeId(3), 0) }).unwrap();
+        doc.apply_op(GraphOp::Connect {
+            from: (NodeId(1), 0),
+            to: (NodeId(3), 0),
+        })
+        .unwrap();
         doc.evaluate();
 
         let mut heights: Vec<f32> = Vec::new();
         for i in 0..8 {
-            let mut input = egui::RawInput::default();
-            input.screen_rect = Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1280.0, 800.0),
-            ));
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
             // Wiggle the pointer: each move is a repaint, which is what made
             // the panel visibly creep in the app.
-            input
-                .events
-                .push(egui::Event::PointerMoved(egui::pos2(200.0 + i as f32 * 7.0, 700.0)));
+            input.events.push(egui::Event::PointerMoved(egui::pos2(
+                200.0 + i as f32 * 7.0,
+                700.0,
+            )));
             let mut height = 0.0f32;
             let _ = ctx.run(input, |ctx| {
                 // Same panel setup as MantisApp::update.
