@@ -21,6 +21,7 @@
 //! Legacy compatibility responses retain wildcard CORS. V2 defaults to
 //! same-origin and permits only exact origins from `MANTIS_ALLOWED_ORIGINS`.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use mantis_chain::{Chain, ChainError};
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
@@ -41,6 +42,10 @@ const MAX_BODY_BYTES: usize = projects::MAX_PROJECT_DOCUMENT_BYTES;
 /// Upper bound for an explicitly paginated pull. Omitting `limit` retains the
 /// v1 behavior (all remaining blocks) for existing GUI clients.
 const MAX_BLOCKS_PAGE: usize = projects::MAX_PAGE_LIMIT;
+
+/// Marker emitted by Trunk on its generated bootstrap and preload tags. It
+/// must never reach a browser: every HTML response replaces it with a nonce.
+const CSP_NONCE_PLACEHOLDER: &str = "{{__MANTIS_CSP_NONCE__}}";
 
 // ---------------------------------------------------------------------------
 // configuration / args
@@ -251,19 +256,34 @@ fn json_response(status: u16, body: String) -> Response<Cursor<Vec<u8>>> {
     with_cors(with_security_headers(resp))
 }
 
-fn with_security_headers<R: Read>(mut resp: Response<R>) -> Response<R> {
+fn content_security_policy(nonce: Option<&str>) -> String {
+    let nonce_source = nonce
+        .map(|value| format!(" 'nonce-{value}'"))
+        .unwrap_or_default();
+    format!(
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{nonce_source}; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+}
+
+fn with_security_headers<R: Read>(resp: Response<R>) -> Response<R> {
+    with_security_headers_and_nonce(resp, None)
+}
+
+fn with_security_headers_and_nonce<R: Read>(
+    mut resp: Response<R>,
+    nonce: Option<&str>,
+) -> Response<R> {
     for (key, value) in [
         ("X-Content-Type-Options", "nosniff"),
         ("Referrer-Policy", "no-referrer"),
         ("X-Frame-Options", "DENY"),
-        (
-            "Content-Security-Policy",
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-        ),
     ] {
         if let Some(header) = hdr(key, value) {
             resp = resp.with_header(header);
         }
+    }
+    if let Some(header) = hdr("Content-Security-Policy", &content_security_policy(nonce)) {
+        resp = resp.with_header(header);
     }
     resp
 }
@@ -425,6 +445,22 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
+/// Replace Trunk's build-time marker with a cryptographically random 128-bit
+/// nonce. Returning an error keeps the server fail-closed if the operating
+/// system RNG is unavailable or the declared UTF-8 HTML is malformed.
+fn inject_html_nonce(bytes: Vec<u8>) -> Result<(Vec<u8>, String), String> {
+    let mut random = [0_u8; 16];
+    getrandom::getrandom(&mut random)
+        .map_err(|error| format!("cannot generate CSP nonce: {error}"))?;
+    let nonce = STANDARD.encode(random);
+    let html = String::from_utf8(bytes)
+        .map_err(|error| format!("static HTML is not valid UTF-8: {error}"))?;
+    Ok((
+        html.replace(CSP_NONCE_PLACEHOLDER, &nonce).into_bytes(),
+        nonce,
+    ))
+}
+
 /// Percent-decode a URL path. Returns None on malformed escapes or invalid
 /// UTF-8 (both rejected with 400 by the caller).
 fn percent_decode(s: &str) -> Option<String> {
@@ -493,6 +529,18 @@ fn serve_static_policy(
     let full = dist.join(&rel_path);
     match std::fs::read(&full) {
         Ok(bytes) => {
+            let is_html = matches!(
+                rel_path.extension().and_then(|value| value.to_str()),
+                Some("html" | "htm")
+            );
+            let (bytes, nonce) = if is_html {
+                match inject_html_nonce(bytes) {
+                    Ok((bytes, nonce)) => (bytes, Some(nonce)),
+                    Err(error) => return static_error(500, &error),
+                }
+            } else {
+                (bytes, None)
+            };
             let mut resp = Response::from_data(bytes);
             if let Some(h) = hdr("Content-Type", content_type(&rel_path)) {
                 resp = resp.with_header(h);
@@ -510,7 +558,7 @@ fn serve_static_policy(
             if let Some(header) = hdr("Cache-Control", cache) {
                 resp = resp.with_header(header);
             }
-            let response = with_security_headers(resp);
+            let response = with_security_headers_and_nonce(resp, nonce.as_deref());
             if legacy_wildcard_cors {
                 with_cors(response)
             } else {
@@ -1852,6 +1900,22 @@ mod tests {
         )
     }
 
+    fn response_header<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+        headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+
+    fn csp_directive<'a>(csp: &'a str, name: &str) -> Option<&'a str> {
+        csp.split(';').map(str::trim).find(|directive| {
+            directive
+                .split_whitespace()
+                .next()
+                .is_some_and(|key| key.eq_ignore_ascii_case(name))
+        })
+    }
+
     fn post(addr: SocketAddr, path: &str, body: &str) -> (u16, String, String) {
         http(
             addr,
@@ -2534,6 +2598,68 @@ mod tests {
         let (status, _, body) = get(addr, "/api/info");
         assert_eq!(status, 200);
         assert!(body.contains("head"), "{body}");
+
+        let _ = std::fs::remove_dir_all(&dist);
+    }
+
+    #[test]
+    fn html_nonce_matches_csp_and_rotates_per_response() {
+        let dist = make_dist();
+        let template = format!(
+            "<style>body{{}}</style>\
+             <script type=\"module\" nonce=\"{CSP_NONCE_PLACEHOLDER}\">\
+             console.log('mantis')</script>"
+        );
+        std::fs::write(dist.join("index.html"), template).unwrap();
+        let (addr, _, _) = start(Chain::new(), Some(dist.clone()));
+
+        let mut nonces = Vec::new();
+        for _ in 0..2 {
+            let (status, headers, body) = get(addr, "/");
+            assert_eq!(status, 200, "{headers}\n{body}");
+            assert!(!body.contains(CSP_NONCE_PLACEHOLDER), "{body}");
+
+            let nonce = body
+                .split_once("nonce=\"")
+                .and_then(|(_, value)| value.split_once('"').map(|(nonce, _)| nonce))
+                .expect("HTML nonce");
+            assert_eq!(body.matches(nonce).count(), 1, "{body}");
+            assert_eq!(STANDARD.decode(nonce).unwrap().len(), 16);
+
+            let csp = response_header(&headers, "Content-Security-Policy")
+                .expect("Content-Security-Policy header");
+            let script_src = csp_directive(csp, "script-src").expect("script-src directive");
+            assert!(
+                script_src.contains(&format!(
+                    "script-src 'self' 'wasm-unsafe-eval' 'nonce-{nonce}'"
+                )),
+                "{script_src}"
+            );
+            assert!(!script_src.contains("'unsafe-inline'"), "{script_src}");
+            assert_eq!(
+                csp_directive(csp, "style-src"),
+                Some("style-src 'self' 'unsafe-inline'")
+            );
+            nonces.push(nonce.to_string());
+        }
+        assert_ne!(nonces[0], nonces[1], "nonce must rotate per response");
+
+        let _ = std::fs::remove_dir_all(&dist);
+    }
+
+    #[test]
+    fn invalid_utf8_html_fails_closed() {
+        let dist = make_dist();
+        std::fs::write(dist.join("broken.html"), [0xff, 0xfe]).unwrap();
+        let (addr, _, _) = start(Chain::new(), Some(dist.clone()));
+
+        let (status, headers, body) = get(addr, "/broken.html");
+        assert_eq!(status, 500, "{headers}\n{body}");
+        assert!(body.contains("static HTML is not valid UTF-8"), "{body}");
+        let csp = response_header(&headers, "Content-Security-Policy")
+            .expect("Content-Security-Policy header");
+        let script_src = csp_directive(csp, "script-src").expect("script-src directive");
+        assert!(!script_src.contains("'unsafe-inline'"), "{script_src}");
 
         let _ = std::fs::remove_dir_all(&dist);
     }

@@ -141,7 +141,15 @@ jobs:
             return 1
           }
           check_endpoints() {
-            curl --fail --silent http://127.0.0.1:7878/ >/dev/null
+            index_html="$(curl --fail --silent http://127.0.0.1:7878/)"
+            if [[ "${index_html}" == *'{{__MANTIS_CSP_NONCE__}}'* ]]; then
+              echo "unexpanded CSP nonce placeholder reached the HTTP response" >&2
+              return 1
+            fi
+            if [[ "${index_html}" != *'nonce="'* ]]; then
+              echo "served HTML bootstrap does not contain a CSP nonce" >&2
+              return 1
+            fi
             curl --fail --silent http://127.0.0.1:7878/healthz >/dev/null
             info_json="$(curl --fail --silent http://127.0.0.1:7878/api/v2/info)"
             INFO_JSON="${info_json}" python3 -c \
@@ -156,6 +164,45 @@ jobs:
           docker restart mantis-ci
           wait_ready
           check_endpoints
+
+      - name: Exercise web application in headless Chrome
+        run: |
+          set -euo pipefail
+          command -v google-chrome >/dev/null
+          command -v chromedriver >/dev/null
+
+          chromedriver_log="${RUNNER_TEMP}/mantis-chromedriver.log"
+          chromedriver --port=9515 --log-path="${chromedriver_log}" &
+          driver_pid=$!
+          cleanup_driver() {
+            result=$?
+            trap - EXIT
+            kill "${driver_pid}" 2>/dev/null || true
+            wait "${driver_pid}" 2>/dev/null || true
+            if [ "${result}" -ne 0 ]; then
+              cat "${chromedriver_log}" 2>/dev/null || true
+            fi
+            exit "${result}"
+          }
+          trap cleanup_driver EXIT
+
+          driver_ready=false
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:9515/status >/dev/null; then
+              driver_ready=true
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "${driver_ready}" != true ]; then
+            echo "ChromeDriver did not become ready after ${attempt} attempts" >&2
+            exit 1
+          fi
+
+          python3 .github/scripts/browser_smoke.py \
+            http://127.0.0.1:7878/ \
+            --webdriver http://127.0.0.1:9515 \
+            --timeout 30
 
       - name: Clean up smoke test
         if: always()

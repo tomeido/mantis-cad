@@ -1,0 +1,6 @@
+[build]
+# Trunk replaces its generated bootstrap script's nonce with this marker.
+# `mantis-server` substitutes a fresh value per HTML response and sends the
+# matching Content-Security-Policy header.
+create_nonce = true
+nonce_placeholder = "{{__MANTIS_CSP_NONCE__}}"
