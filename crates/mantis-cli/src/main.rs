@@ -6,6 +6,7 @@
 //!   catalog [--json]                     discover component/port metadata
 //!   apply FILE --ops OPS --identity ID   validate + sign an atomic edit batch
 //!   graph FILE [--json]                  inspect the materialized graph
+//!   diff FILE [--from N] [--to N]        compare definition + derived geometry
 //!   audit FILE                           provenance + anchor checkpoint JSON
 //!   inspect FILE                         table of blocks in a chain file
 //!   verify FILE                          full chain validation
@@ -17,6 +18,7 @@
 
 mod agent;
 mod demo;
+mod diff;
 mod replay;
 
 use mantis_chain::{Chain, Identity};
@@ -34,6 +36,8 @@ USAGE:
                                                validate, evaluate, sign, and atomically
                                                commit one GraphOp batch
   mantis-cli graph FILE [--upto N] [--json]    materialized graph + evaluation results
+  mantis-cli diff FILE [--from N] [--to N] [--json]
+                                               compare committed definition + geometry
   mantis-cli audit FILE                         verified provenance + head checkpoint JSON
   mantis-cli inspect FILE                      list blocks (idx, author, ops, bytes)
   mantis-cli verify FILE                       validate chain, print OK or the error
@@ -85,6 +89,7 @@ fn dispatch(args: &[String]) -> Result<String, CliError> {
         "catalog" => agent::cmd_catalog(rest),
         "apply" => agent::cmd_apply(rest),
         "graph" => agent::cmd_graph(rest),
+        "diff" => diff::cmd_diff(rest),
         "audit" => agent::cmd_audit(rest),
         "inspect" => cmd_inspect(rest),
         "verify" => cmd_verify(rest),

@@ -8,4 +8,5 @@ license.workspace = true
 mantis-kernel = { workspace = true }
 mantis-graph = { workspace = true }
 mantis-chain = { workspace = true }
+mantis-history = { workspace = true }
 serde_json = { workspace = true }
