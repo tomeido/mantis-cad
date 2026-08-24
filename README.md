@@ -19,6 +19,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 ├─────────────────────────────────────────────────────────────┤
 │  mantis-protocol 프로젝트·ACL·동기화의 버전 고정 공용 계약            │
 │  mantis-chain   GraphOp만 담는 sha256+ed25519 블록체인          │
+│  mantis-history 서명 리비전의 정의·preview 형상 비교             │
 │  mantis-graph   Grasshopper식 데이터플로 엔진, 63개 컴포넌트      │
 │  mantis-kernel  기하 커널: NURBS·메시·extrude/revolve/loft/pipe │
 └─────────────────────────────────────────────────────────────┘
@@ -50,6 +51,10 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
   `hash = sha256(정규 JSON)`, `sig = ed25519(해시 원바이트)`. 검증은 해시 링크·서명·
   **전체 op 리플레이 가능성**까지 확인. fast-forward 병합(`try_extend`), 타임트래블 리플레이,
   공개 원장에 앵커링 가능한 검증 완료 head 체크포인트(`audit`).
+- **mantis-history** — 서명 체인의 두 블록 리비전을 리플레이해 노드·연결·
+  파라미터의 순변화와 구간 커밋을 비교. 현재 평가기로 preview 형상을 다시 계산해
+  점·곡선·메시 fingerprint, 경계, 면적, 체적과 변경 분류를 생성하며 파생 형상은
+  체인에 기록하지 않음.
 - **mantis-protocol** — 프로젝트 manifest, scoped genesis, 서명된 접근권한 원장, 동기화 DTO,
   portable workspace를 앱·서버·관리 CLI·AI agent가 공유하는 버전 고정 계약.
 - **mantis-app** — eframe/egui. glow 3D 뷰포트(궤도/팬/줌, z-up), 직접 구현한 노드 에디터
@@ -62,7 +67,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 - **mantis-admin** — 운영자/owner가 프로젝트 생성, writer 초대·회수, export·검증·복원,
   legacy 단일 체인 마이그레이션을 수행하는 CLI. 비밀키는 서버에 보관하지 않음.
 - **mantis-cli** — 헤드리스: 키 생성, 컴포넌트 카탈로그, GraphOp 배치의 dry-run·평가·서명,
-  그래프 JSON 관측, 감사 체크포인트, 리플레이→OBJ 내보내기.
+  그래프 JSON 관측, 리비전 `diff`, 감사 체크포인트, 리플레이→OBJ 내보내기.
 
 ## 협업 모델 (git과 닮음)
 
@@ -181,7 +186,28 @@ cargo run --locked --release -p mantis-server -- \
 cargo run --locked -p mantis-cli -- demo --out demo-chain.json
 cargo run --locked -p mantis-cli -- verify demo-chain.json
 cargo run --locked -p mantis-cli -- replay demo-chain.json --obj tower.obj
+
+# 서명된 리비전 1→2의 정의·형상 변경 비교
+cargo run --locked -p mantis-cli -- diff examples/demo-chain.json --from 1 --to 2
+cargo run --locked -p mantis-cli -- diff examples/demo-chain.json --from 1 --to 2 --json \
+  > history-diff.json
 ```
+
+### 정의·형상 변경 이력 비교
+
+`diff FILE [--from N] [--to N] [--json]`의 `N`은 genesis를 0으로 하는 블록 인덱스입니다.
+`--to`를 생략하면 head, `--from`까지 생략하면 head 직전(가능하지 않으면
+genesis)과 비교합니다. 일반 출력은 `(from, to]` 구간의 커밋·연산 수, 노드·연결의
+순변화, preview 점·곡선·메시 개수와 면적·부호 체적, 객체 변경 수를 요약합니다.
+`--json`은 동일한 보고서와 구간의 원본 `GraphOp`를 schema version 1 JSON으로 출력합니다.
+
+분류는 `no_effect`, `layout_only`, `definition_only`, `geometry_changed`, `incomplete`입니다.
+`incomplete`는 fingerprint 변화는 없지만 평가 오류·너무 깊은 리스트·비유한 형상
+때문에 “형상이 변하지 않았다”를 보장할 수 없음을 뜻합니다. 형상은 체인에 남은
+스냅샷이 아니라 **현재 바이너리의 평가기**로 다시 계산한 preview 출력입니다.
+메시 fingerprint는 테셀레이션의 정확 비교이지
+공차를 고려한 B-rep 동치성 판정이 아니며, `.gh`, `.ghx`, `.3dm` 파일을 직접 읽지 않습니다.
+상세한 가정·위험·비범위는 [MVP 범위](docs/MVP_SCOPE.md)에 정리했습니다.
 
 ## AI agent 편집 프로토콜
 
@@ -263,7 +289,8 @@ sha256-linked, ed25519-signed blocks — **never geometry**. Peers replay the
 op-log deterministically to rebuild identical models, so a multi-megabyte
 model syncs as kilobytes. Workspace: `mantis-kernel` (geometry),
 `mantis-graph` (dataflow engine, 63 components), `mantis-chain` (op-log
-blockchain), `mantis-protocol` (versioned project/access/sync contracts),
+blockchain), `mantis-history` (definition and derived-preview revision diff),
+`mantis-protocol` (versioned project/access/sync contracts),
 `mantis-app` (egui GUI, native+wasm), `mantis-server` (public-read,
 invite-write multi-project sync + static hosting), `mantis-admin` (signed
 project/member operations), and `mantis-cli` (headless replay/inspect/demo).
