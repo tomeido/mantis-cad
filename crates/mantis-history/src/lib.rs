@@ -5,7 +5,9 @@
 //! registry; it is never written back to the chain.
 
 use mantis_chain::{Chain, ChainError};
-use mantis_graph::{Edge, Evaluator, Graph, GraphOp, Node, NodeId, ParamValue, Registry, Value};
+use mantis_graph::{
+    Edge, Evaluator, Graph, GraphOp, Node, NodeId, ParamValue, Registry, Value, ValueKind,
+};
 use mantis_kernel::{BBox, Curve, Mesh, Plane, Vec3};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -361,7 +363,7 @@ pub fn compare_revisions(
     let before_graph = chain.replay(Some(from))?;
     let after_graph = chain.replay(Some(to))?;
     let definition = diff_graphs(&before_graph, &after_graph);
-    let geometry = diff_geometry(&before_graph, &after_graph);
+    let geometry = diff_geometry(&before_graph, &after_graph, definition.is_empty());
     let classification = classify(&definition, &geometry);
     let commits = chain
         .blocks
@@ -498,7 +500,7 @@ fn diff_graphs(before: &Graph, after: &Graph) -> DefinitionDiff {
     }
 }
 
-fn diff_geometry(before: &Graph, after: &Graph) -> GeometryDiff {
+fn diff_geometry(before: &Graph, after: &Graph, definitions_match: bool) -> GeometryDiff {
     let before = evaluate_geometry(before);
     let after = evaluate_geometry(after);
     let before_by_id: BTreeMap<_, _> = before
@@ -539,6 +541,11 @@ fn diff_geometry(before: &Graph, after: &Graph) -> GeometryDiff {
 
     let status = if before.summary.scene_fingerprint != after.summary.scene_fingerprint {
         GeometryDiffStatus::Changed
+    } else if definitions_match {
+        // Evaluation is deterministic within this engine build. Identical
+        // definitions therefore have identical derived results even when a
+        // drawable branch fails in both snapshots.
+        GeometryDiffStatus::Unchanged
     } else if !before.is_complete() || !after.is_complete() {
         GeometryDiffStatus::Incomplete
     } else {
@@ -564,7 +571,11 @@ fn evaluate_geometry(graph: &Graph) -> RevisionGeometry {
         // Geometry comparison follows the viewport: hidden nodes do not make
         // the visible scene incomplete. A hidden upstream failure still
         // propagates to any preview-enabled downstream node and is retained.
-        .filter(|(id, _)| graph.nodes.get(id).is_some_and(Node::preview))
+        .filter(|(id, _)| {
+            graph.nodes.get(id).is_some_and(|node| {
+                node.preview() && component_may_output_geometry(node, &registry)
+            })
+        })
         .map(|(id, message)| EvaluationError {
             node_id: *id,
             node_type: graph
@@ -610,6 +621,19 @@ fn evaluate_geometry(graph: &Graph) -> RevisionGeometry {
         truncated_list_count,
         invalid_geometry_count,
     }
+}
+
+fn component_may_output_geometry(node: &Node, registry: &Registry) -> bool {
+    let Some(component) = registry.get(&node.type_name) else {
+        // A newer peer may know drawable outputs that this registry does not.
+        return true;
+    };
+    component.outputs().iter().any(|port| {
+        matches!(
+            port.ty,
+            ValueKind::Any | ValueKind::Vector | ValueKind::Curve | ValueKind::Mesh
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1116,6 +1140,48 @@ mod tests {
     }
 
     #[test]
+    fn scalar_only_node_error_does_not_make_geometry_incomplete() {
+        let mut chain = sample_chain();
+        chain
+            .append(
+                vec![GraphOp::AddNode {
+                    id: node(9),
+                    type_name: "sin".into(),
+                    pos: (0.0, 0.0),
+                }],
+                "broken scalar branch",
+                &identity(),
+                4,
+            )
+            .unwrap();
+        let report = compare_revisions(&chain, 3, 4).unwrap();
+        assert_eq!(report.geometry.status, GeometryDiffStatus::Unchanged);
+        assert!(report.geometry.after.is_complete());
+        assert_eq!(report.classification, ChangeClassification::DefinitionOnly);
+    }
+
+    #[test]
+    fn identical_failing_revision_still_has_no_comparison_effect() {
+        let mut chain = sample_chain();
+        chain
+            .append(
+                vec![GraphOp::AddNode {
+                    id: node(9),
+                    type_name: "future_component".into(),
+                    pos: (0.0, 0.0),
+                }],
+                "unknown component",
+                &identity(),
+                4,
+            )
+            .unwrap();
+        let report = compare_revisions(&chain, 4, 4).unwrap();
+        assert!(!report.geometry.before.is_complete());
+        assert_eq!(report.geometry.status, GeometryDiffStatus::Unchanged);
+        assert_eq!(report.classification, ChangeClassification::NoEffect);
+    }
+
+    #[test]
     fn invalid_revision_ranges_are_rejected_instead_of_clamped() {
         let chain = sample_chain();
         assert_eq!(
@@ -1138,6 +1204,50 @@ mod tests {
         assert!(report.definition.is_empty());
         assert_eq!(report.geometry.status, GeometryDiffStatus::Unchanged);
         assert_eq!(report.classification, ChangeClassification::NoEffect);
+    }
+
+    #[test]
+    fn edge_storage_order_is_not_a_definition_change() {
+        let mut before = Graph::new();
+        for (id, type_name) in [
+            (1, "number_slider"),
+            (2, "number_slider"),
+            (3, "add"),
+            (9, "future_component"),
+        ] {
+            before
+                .apply(&GraphOp::AddNode {
+                    id: node(id),
+                    type_name: type_name.into(),
+                    pos: (0.0, 0.0),
+                })
+                .unwrap();
+        }
+        let first = GraphOp::Connect {
+            from: (node(1), 0),
+            to: (node(3), 0),
+        };
+        let second = GraphOp::Connect {
+            from: (node(2), 0),
+            to: (node(3), 1),
+        };
+        before.apply(&first).unwrap();
+        before.apply(&second).unwrap();
+
+        let mut after = before.clone();
+        after
+            .apply(&GraphOp::Disconnect {
+                from: (node(1), 0),
+                to: (node(3), 0),
+            })
+            .unwrap();
+        after.apply(&first).unwrap();
+        assert_ne!(before, after, "raw edge Vec order should differ");
+
+        let definition = diff_graphs(&before, &after);
+        assert!(definition.is_empty());
+        let geometry = diff_geometry(&before, &after, definition.is_empty());
+        assert_eq!(geometry.status, GeometryDiffStatus::Unchanged);
     }
 
     #[test]
