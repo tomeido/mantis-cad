@@ -4,6 +4,7 @@ members = [
     "crates/mantis-kernel",
     "crates/mantis-graph",
     "crates/mantis-chain",
+    "crates/mantis-history",
     "crates/mantis-protocol",
     "crates/mantis-app",
     "crates/mantis-server",
@@ -20,6 +21,7 @@ license = "MIT"
 mantis-kernel = { path = "crates/mantis-kernel" }
 mantis-graph = { path = "crates/mantis-graph" }
 mantis-chain = { path = "crates/mantis-chain" }
+mantis-history = { path = "crates/mantis-history" }
 mantis-protocol = { path = "crates/mantis-protocol" }
 
 serde = { version = "1", features = ["derive"] }

@@ -1622,6 +1622,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mantis-history"
+version = "0.1.0"
+dependencies = [
+ "mantis-chain",
+ "mantis-graph",
+ "mantis-kernel",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "mantis-kernel"
 version = "0.1.0"
 dependencies = [
