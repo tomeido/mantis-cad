@@ -43,7 +43,7 @@ RUN --mount=type=cache,id=mantis-native-registry-${TARGETARCH},target=/usr/local
     && install -Dm755 target/release/mantis-server /out/bin/mantis-server \
     && install -Dm755 target/release/mantis-admin /out/bin/mantis-admin
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 
 ARG MANTIS_GIT_SHA=unknown
 
