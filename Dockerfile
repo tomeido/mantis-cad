@@ -66,6 +66,8 @@ COPY --from=server-builder --chown=root:root /out/bin/mantis-server /usr/local/b
 COPY --from=server-builder --chown=root:root /out/bin/mantis-admin /usr/local/bin/mantis-admin
 COPY --from=web-builder --chown=root:root /out/dist/ /app/dist/
 COPY --chown=root:root LICENSE /usr/share/licenses/mantis-cad/LICENSE
+COPY --chown=root:root crates/mantis-kernel/THIRD_PARTY_LICENSES.md /usr/share/licenses/mantis-cad/THIRD_PARTY_LICENSES.md
+COPY --chown=root:root crates/mantis-kernel/THIRD_PARTY_LICENSES.md /app/dist/THIRD_PARTY_LICENSES.md
 
 ENV PORT=7878 \
     MANTIS_DATA_DIR=/data \

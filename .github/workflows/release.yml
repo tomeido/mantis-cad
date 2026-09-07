@@ -266,6 +266,7 @@ jobs:
           output="${GITHUB_WORKSPACE}/package/${package}"
           trunk build index.html --release --locked --dist "${output}" --public-url /
           cp "${GITHUB_WORKSPACE}/LICENSE" "${output}/"
+          cp "${GITHUB_WORKSPACE}/crates/mantis-kernel/THIRD_PARTY_LICENSES.md" "${output}/"
           tar -C "${GITHUB_WORKSPACE}/package" -czf "${GITHUB_WORKSPACE}/${package}.tar.gz" "${package}"
 
       - name: Upload web bundle
