@@ -5,6 +5,13 @@
 .env.*
 target
 dist
+dist-downloads
+interop/.venv
+interop/__pycache__
+interop/grasshopper/bin
+interop/grasshopper/obj
+interop/grasshopper/build
+packaging/__pycache__
 *.identity.json
 *.mantis-key
 *.export.json

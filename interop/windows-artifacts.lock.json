@@ -1,0 +1,25 @@
+{
+  "python": "3.14.7",
+  "artifacts": {
+    "python-3.14.7-embed-amd64.zip": {
+      "url": "https://www.python.org/ftp/python/3.14.7/python-3.14.7-embed-amd64.zip",
+      "sha256": "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15",
+      "bytes": 12673227
+    },
+    "rhino3dm-8.32.1-cp314-cp314-win_amd64.whl": {
+      "url": "https://files.pythonhosted.org/packages/dd/e5/a8125f1483e6da30c3a9a60ba14ceb314ab16c2ac925beb6330851f3ca89/rhino3dm-8.32.1-cp314-cp314-win_amd64.whl",
+      "sha256": "77467f919ec21bf7c20e8af7b33e76c6618dcf312cdb63c0a09865a5f7338310",
+      "bytes": 2612591
+    },
+    "cadquery_ocp_novtk-7.9.3.1.1-cp314-cp314-win_amd64.whl": {
+      "url": "https://files.pythonhosted.org/packages/ee/8a/8423862301a23078f3f34612c058f0c121fc7749182811f903a78445e77a/cadquery_ocp_novtk-7.9.3.1.1-cp314-cp314-win_amd64.whl",
+      "sha256": "eabb9e4eceb4d44b1555981aec8821c3b133300ed4a3929e4fea4510b6737cd5",
+      "bytes": 46508391
+    },
+    "cadquery_ocp_proxy-7.9.3.1.1-py3-none-any.whl": {
+      "url": "https://files.pythonhosted.org/packages/30/c0/04e9363a99fee892de2776820e3dcf04f8825b6edc9580efe3416c9465a7/cadquery_ocp_proxy-7.9.3.1.1-py3-none-any.whl",
+      "sha256": "ca4164ec4b54956d9fc3e68c67d555b5486cb963c2f71e18df005ba16b921c91",
+      "bytes": 3322
+    }
+  }
+}

@@ -4,11 +4,12 @@
 
 MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적용된 순서"** 그 자체입니다.
 슬라이더를 추가하고, 원을 그리고, 로프트를 연결한 모든 편집이 `GraphOp`(그래프 연산)으로
-기록되고, 이 연산들이 **서명된 해시체인 블록**에 담깁니다. 메시·정점 데이터는 체인에 절대
-올라가지 않습니다 — 모든 피어가 op-log를 결정론적으로 리플레이해서 동일한 모델을 로컬에서
-재생성합니다.
+기록되고, 이 연산들이 **서명된 해시체인 블록**에 담깁니다. 일반 파라메트릭 형상은
+모든 피어가 op-log를 결정론적으로 리플레이해 로컬에서 재생성합니다. CAD 파일에서
+가져온 형상과 외부 B-rep 연산 결과는 예외로 원본·미리보기 데이터를 노드 파라미터에
+보관하므로 프로젝트 크기가 형상 데이터만큼 증가합니다.
 
-> 수십 MB짜리 메시 모델도 체인 위에서는 **몇 KB의 연산 기록**입니다.
+> 기본 노드로 생성한 모델은 **작은 연산 기록**으로 보관합니다. 외부 CAD 형상은 원본 데이터도 함께 저장합니다.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -20,7 +21,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 │  mantis-protocol 프로젝트·ACL·동기화의 버전 고정 공용 계약            │
 │  mantis-chain   GraphOp만 담는 sha256+ed25519 블록체인          │
 │  mantis-history 서명 리비전의 정의·preview 형상 비교             │
-│  mantis-graph   Grasshopper식 데이터플로 엔진, 63개 컴포넌트      │
+│  mantis-graph   Grasshopper식 데이터플로 엔진, 83개 컴포넌트      │
 │  mantis-kernel  기하 커널: NURBS·메시·extrude/revolve/loft/pipe │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -29,7 +30,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 
 | | 일반 CAD 파일 | MantisCAD 체인 |
 |---|---|---|
-| 기록 대상 | 정점·면·NURBS 지오메트리 전체 | 컴포넌트 추가/연결/파라미터 변경 연산만 |
+| 기록 대상 | 정점·면·NURBS 지오메트리 전체 | 컴포넌트 연산, 가져온 CAD 원본은 별도 파라미터 |
 | 트위스트 타워 예시 | 수 MB (메시) | **수 KB (op 몇십 개)** |
 | 협업 동기화 | 파일 전체 전송 | 새 블록만 전송 (git처럼) |
 | 히스토리 | 없거나 별도 관리 | 체인 자체가 완전한 히스토리 (타임트래블 가능) |
@@ -37,15 +38,17 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 결정론이 핵심 규약입니다: 평가 순서·직렬화·해시 경로에 `HashMap` 금지(`BTreeMap`/`Vec`만),
 라이브러리 코드에 난수·시계 접근 금지, 노드 ID는 UI에서 생성되어 **op 안에 기록**됩니다.
 블록 해시는 오직 연산+메타데이터만 커버하므로 플랫폼 간 부동소수점 미차가 체인을 포크시킬
-수 없습니다 (지오메트리는 파생물일 뿐, 권위가 아닙니다).
+수 없습니다. 가져온 CAD 형상은 저장된 원본과 미리보기가 기록의 일부이며,
+외부 엔진을 다시 실행하지 않고 그 데이터를 재생합니다.
 
 ## 아키텍처
 
 - **mantis-kernel** — 순수 기하: `Vec3/Mat4/Plane`, 해석적 곡선(선/폴리라인/원/호) +
   유리 NURBS(de Boor, 주기적 닫힘 지원), 워터타이트 프리미티브(박스/구/실린더/콘/토러스),
-  extrude(귀자르기 캡)/revolve/loft/pipe(평행이동 프레임)/planar surface, OBJ 내보내기.
+  extrude(귀자르기 캡)/revolve/loft/pipe(평행이동 프레임)/planar surface,
+  닫힌 메시 Boolean·평면 Trim/Split, OBJ 내보내기.
 - **mantis-graph** — `Component` 트레이트 + 레지스트리, 결정론적 위상정렬 평가기
-  (더티 추적 캐시), Grasshopper의 longest-list 매칭, 63개 빌트인 컴포넌트
+  (더티 추적 캐시), Grasshopper의 longest-list 매칭, 83개 빌트인 컴포넌트
   (Params/Maths/Sets/Vector/Curve/Surface/Transform/Analysis).
 - **mantis-chain** — `Block { index, prev_hash, timestamp, author, author_pk, message, ops, hash, sig }`.
   `hash = sha256(정규 JSON)`, `sig = ed25519(해시 원바이트)`. 검증은 해시 링크·서명·
@@ -54,7 +57,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 - **mantis-history** — 서명 체인의 두 블록 리비전을 리플레이해 노드·연결·
   파라미터의 순변화와 구간 커밋을 비교. 현재 평가기로 preview 형상을 다시 계산해
   점·곡선·메시 fingerprint, 경계, 면적, 체적과 변경 분류를 생성하며 파생 형상은
-  체인에 기록하지 않음.
+  별도 스냅샷으로 중복 기록하지 않음.
 - **mantis-protocol** — 프로젝트 manifest, scoped genesis, 서명된 접근권한 원장, 동기화 DTO,
   portable workspace를 앱·서버·관리 CLI·AI agent가 공유하는 버전 고정 계약.
 - **mantis-app** — eframe/egui. glow 3D 뷰포트(궤도/팬/줌, z-up), 직접 구현한 노드 에디터
@@ -84,6 +87,28 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 프로필을 사용하고, 앱에서 암호화된 `.mantis-key` 백업을 별도로 보관하세요.
 
 ## 사용 방법
+
+### 파일 호환과 B-rep 연산
+
+**CAD…**에서 `.3dm`·`.ghx`·`.gh`·STEP을 가져오고 저장합니다.
+**Solids & fillets**에서 OpenCascade B-rep 생성·Boolean·평면 Trim·모서리 Fillet을
+사용합니다. GHX와 메시 연산은 기본 앱에서, 3DM·STEP·B-rep·바이너리 GH는
+선택형 호환팩에서 처리합니다. [지원 범위와 사용법](docs/INTEROP.md)을 확인하세요.
+
+### 명령으로 모델링하기
+
+**Commands… / Ctrl+K (macOS: ⌘K)** 에서 `Circle 5`, `Box 10 20 30`처럼
+명령을 실행합니다. 생성된 노드가 선택된 상태에서 `ExtrudeCrv 10`, `Move 10 0 0`,
+`ArrayLinear 5 10 0 0`을 이어서 실행하면 편집 가능한 슬라이더와 연결이 자동으로
+만들어집니다. 명령 하나는 실행 취소 한 단계로 처리됩니다.
+
+40종의 명령과 83종의 컴포넌트를 제공하며, 입력값·출력값 검사창으로 노드를 수정할 수
+있습니다. [명령 및 기능 가이드](docs/COMMANDS.md)에 예제와 지원 범위를 정리했습니다.
+직선·원형 배열, 리스트 정렬·이동·분기·병합, seed 난수가 추가되었고,
+화면 이동 중 재평가와 실행 취소 기록의 중복 복사를 줄였습니다.
+
+설치 파일 제작·실행 방법은 [설치 가이드](docs/INSTALL.md)를 참고하세요.
+앱은 네이티브 Rust/egui 프로그램으로, 설치 후 서버 없이 로컬 작업을 할 수 있습니다.
 
 공개 웹 앱은 [domeido.asuscomm.com/mantis/](https://domeido.asuscomm.com/mantis/)에서 바로
 실행할 수 있습니다. 동일한 OCI 이미지를 직접 호스팅하면 하나의 HTTPS 주소에서 브라우저 UI와
@@ -288,7 +313,7 @@ IS a Grasshopper-style node graph; every edit is a `GraphOp` sealed into
 sha256-linked, ed25519-signed blocks — **never geometry**. Peers replay the
 op-log deterministically to rebuild identical models, so a multi-megabyte
 model syncs as kilobytes. Workspace: `mantis-kernel` (geometry),
-`mantis-graph` (dataflow engine, 63 components), `mantis-chain` (op-log
+`mantis-graph` (dataflow engine, 83 components), `mantis-chain` (op-log
 blockchain), `mantis-history` (definition and derived-preview revision diff),
 `mantis-protocol` (versioned project/access/sync contracts),
 `mantis-app` (egui GUI, native+wasm), `mantis-server` (public-read,

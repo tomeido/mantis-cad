@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-admin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1582,6 +1582,7 @@ dependencies = [
  "mantis-graph",
  "mantis-kernel",
  "mantis-protocol",
+ "quick-xml",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -1591,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-chain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -1604,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mantis-chain",
  "mantis-graph",
@@ -1615,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mantis-kernel",
  "serde",
@@ -1624,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-history"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mantis-chain",
  "mantis-graph",
@@ -1636,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1644,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -1658,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",

@@ -2,7 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(not(target_arch = "wasm32"))]
+mod cad_io;
 mod chain_panel;
+mod commands;
+#[cfg(not(target_arch = "wasm32"))]
+mod grasshopper;
 mod key_backup;
 mod node_editor;
 mod state;
@@ -18,7 +23,9 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 500.0])
             .with_title("MantisCAD"),
-        multisampling: 4,
+        // Avoid a 4x multisampled framebuffer: it increases GPU memory and
+        // prevents startup on some software/remote OpenGL implementations.
+        multisampling: 0,
         depth_buffer: 24,
         ..Default::default()
     };

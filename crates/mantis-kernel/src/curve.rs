@@ -130,6 +130,13 @@ impl NurbsCurve {
             }
             &repaired
         };
+        self.point_at_knots(t, knots, p)
+    }
+
+    /// Evaluate a previously validated knot vector. Adaptive division reuses
+    /// its validation instead of rescanning all knots for every sample.
+    fn point_at_knots(&self, t: f64, knots: &[f64], p: usize) -> Vec3 {
+        let n = self.control_points.len();
         let w = |i: usize| self.weights.get(i).copied().unwrap_or(1.0).max(1e-12);
 
         let lo = knots[p];
@@ -139,10 +146,9 @@ impl NurbsCurve {
         }
         let u = lo + (hi - lo) * t.clamp(0.0, 1.0);
         // Knot span k in [p, n-1] with knots[k] <= u (< knots[k+1] except at end).
-        let mut k = p;
-        while k + 1 < n && u >= knots[k + 1] {
-            k += 1;
-        }
+        let k = (p + knots[p..n].partition_point(|&knot| knot <= u))
+            .saturating_sub(1)
+            .clamp(p, n - 1);
         // Rational de Boor in homogeneous coordinates.
         let mut dx: Vec<Vec3> = (0..=p)
             .map(|j| self.control_points[j + k - p] * w(j + k - p))
@@ -166,6 +172,79 @@ impl NurbsCurve {
         } else {
             dx[p] / dw[p]
         }
+    }
+
+    /// (normalized parameter, point, cumulative chord length), ordered by t.
+    fn arc_length_table(&self) -> Vec<(f64, Vec3, f64)> {
+        use std::collections::VecDeque;
+        const MAX_SAMPLES: usize = 16_385;
+        const MAX_SEEDS: usize = 4097;
+        let n = self.control_points.len();
+        let p = self.degree.min(n.saturating_sub(1));
+        let valid_knots = n >= 2
+            && self.knots.len() == n + p + 1
+            && self.knots.iter().all(|k| k.is_finite())
+            && self.knots.windows(2).all(|k| k[0] <= k[1]);
+        let point = |t| {
+            if valid_knots {
+                self.point_at_knots(t, &self.knots, p)
+            } else {
+                self.point_at(t)
+            }
+        };
+        // Uniform seeds expose inflections within a single polynomial span;
+        // knot seeds retain short/nonuniform spans and degree-one corners.
+        let mut seeds: Vec<f64> = (0..=32).map(|i| i as f64 / 32.0).collect();
+        if valid_knots {
+            let lo = self.knots[p];
+            let extent = self.knots[n] - lo;
+            if extent.is_finite() && extent >= 1e-12 {
+                for knot in self.knots[p + 1..n].iter().copied() {
+                    if knot > lo && knot < self.knots[n] {
+                        seeds.push((knot - lo) / extent);
+                        if seeds.len() > MAX_SEEDS {
+                            // Keep the allocation and subdivision work bounded
+                            // even for externally supplied, extremely dense knots.
+                            seeds = (0..MAX_SEEDS)
+                                .map(|i| i as f64 / (MAX_SEEDS - 1) as f64)
+                                .collect();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        seeds.sort_by(f64::total_cmp);
+        seeds.dedup();
+        let mut samples: Vec<_> = seeds.iter().map(|&t| (t, point(t), 0.0)).collect();
+        let mut pending: VecDeque<_> = samples
+            .windows(2)
+            .map(|s| (s[0].0, s[0].1, s[1].0, s[1].1, 0u8))
+            .collect();
+        let tolerance = (BBox::from_points(&self.control_points).diagonal() * 1e-7).max(1e-10);
+        while samples.len() < MAX_SAMPLES {
+            let Some((t0, a, t1, b, depth)) = pending.pop_front() else {
+                break;
+            };
+            let tm = t0 + (t1 - t0) * 0.5;
+            if tm <= t0 || tm >= t1 {
+                continue;
+            }
+            let middle = point(tm);
+            samples.push((tm, middle, 0.0));
+            // Also detect nonlinear speed on a geometrically straight rational
+            // span: curvature/chord-length excess alone would miss that case.
+            let deviation = middle.distance(a * 0.5 + b * 0.5);
+            if depth < 24 && (depth < 2 || deviation > tolerance) {
+                pending.push_back((t0, a, tm, middle, depth + 1));
+                pending.push_back((tm, middle, t1, b, depth + 1));
+            }
+        }
+        samples.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for i in 1..samples.len() {
+            samples[i].2 = samples[i - 1].2 + samples[i - 1].1.distance(samples[i].1);
+        }
+        samples
     }
 }
 
@@ -461,14 +540,54 @@ impl Curve {
         }
     }
 
-    /// `n` points spread evenly by parameter (Grasshopper Divide Curve:
-    /// n segments -> n+1 points for open, n points for closed).
+    /// Divide into `n` equal arc-length segments: n+1 points for open curves,
+    /// n points for closed curves (without repeating the seam).
+    ///
+    /// Line/polyline/circle/arc division is exact. NURBS use an adaptive
+    /// chord-length table seeded at knot spans. Subdivision targets a maximum
+    /// midpoint deviation of 1e-7 of the control-point bounding-box diagonal
+    /// (at least 1e-10 model units), with at most 16,385 table samples and
+    /// subdivision depth 24.
+    /// This is a numerical approximation, not a certified error bound; the
+    /// subdivision cap can reduce accuracy on extreme weights or dense knots.
+    /// Returned points are evaluated on the NURBS, rather than on its chords.
     /// n == 0 returns an empty Vec.
     pub fn divide(&self, n: usize) -> Vec<Vec3> {
         if n == 0 {
             return Vec::new();
         }
-        self.tessellate(n)
+        let Curve::Nurbs(curve) = self else {
+            return self.tessellate(n);
+        };
+        let count = if self.is_closed() { n } else { n + 1 };
+        let table = curve.arc_length_table();
+        let total = table.last().map(|s| s.2).unwrap_or(0.0);
+        if !total.is_finite() || total <= 0.0 {
+            return vec![curve.point_at(0.0); count];
+        }
+        let mut segment = 1;
+        (0..count)
+            .map(|i| {
+                if i == 0 {
+                    return table[0].1;
+                }
+                if i == n {
+                    return table.last().unwrap().1;
+                }
+                let target = total * (i as f64 / n as f64);
+                while segment + 1 < table.len() && table[segment].2 < target {
+                    segment += 1;
+                }
+                let (t0, _, l0) = table[segment - 1];
+                let (t1, _, l1) = table[segment];
+                let fraction = if l1 > l0 {
+                    ((target - l0) / (l1 - l0)).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                curve.point_at(t0 + (t1 - t0) * fraction)
+            })
+            .collect()
     }
 
     /// Transform the curve. Defining points are transformed directly.
@@ -830,6 +949,92 @@ mod tests {
         // Evenly spaced by parameter.
         let d = line.divide(4);
         assert!(d[1].distance(v(0.25, 0.0, 0.0)) < 1e-12);
+    }
+
+    #[test]
+    fn divide_nurbs_follows_length_instead_of_knot_parameter_or_rational_speed() {
+        let uneven = Curve::Nurbs(
+            NurbsCurve::from_points(
+                &[v(0.0, 0.0, 0.0), v(1.0, 0.0, 0.0), v(11.0, 0.0, 0.0)],
+                1,
+                false,
+            )
+            .unwrap(),
+        );
+        let points = uneven.divide(2);
+        assert_eq!(points.len(), 3);
+        assert!(points[1].distance(v(5.5, 0.0, 0.0)) < 1e-12);
+        // A collinear rational curve has zero curvature, but its parameter
+        // speed varies. A curvature-only table would place the midpoint wrong.
+        let weighted = Curve::Nurbs(NurbsCurve {
+            degree: 1,
+            control_points: vec![Vec3::ZERO, v(11.0, 0.0, 0.0)],
+            weights: vec![1.0, 20.0],
+            knots: vec![0.0, 0.0, 1.0, 1.0],
+        });
+        for (i, point) in weighted.divide(11).iter().enumerate() {
+            assert!(
+                point.distance(v(i as f64, 0.0, 0.0)) < 2e-6,
+                "{i}: {point:?}"
+            );
+        }
+        assert!(weighted.divide(0).is_empty());
+    }
+
+    #[test]
+    fn divide_weighted_nurbs_circle_matches_independent_analytic_arc_lengths() {
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let quarter = Curve::Nurbs(NurbsCurve {
+            degree: 2,
+            control_points: vec![Vec3::X, v(1.0, 1.0, 0.0), Vec3::Y],
+            weights: vec![1.0, w, 1.0],
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        });
+        for (i, point) in quarter.divide(8).iter().enumerate() {
+            let angle = i as f64 * std::f64::consts::FRAC_PI_2 / 8.0;
+            assert!(point.distance(v(angle.cos(), angle.sin(), 0.0)) < 2e-7);
+            assert!((point.length() - 1.0).abs() < 1e-12);
+        }
+        let circle = Curve::Nurbs(NurbsCurve {
+            degree: 2,
+            control_points: vec![
+                Vec3::X,
+                v(1.0, 1.0, 0.0),
+                Vec3::Y,
+                v(-1.0, 1.0, 0.0),
+                -Vec3::X,
+                v(-1.0, -1.0, 0.0),
+                -Vec3::Y,
+                v(1.0, -1.0, 0.0),
+                Vec3::X,
+            ],
+            weights: vec![1.0, w, 1.0, w, 1.0, w, 1.0, w, 1.0],
+            knots: vec![
+                0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0,
+            ],
+        });
+        let points = circle.divide(16);
+        assert_eq!(points.len(), 16);
+        for (i, point) in points.iter().enumerate() {
+            let angle = i as f64 * std::f64::consts::TAU / 16.0;
+            assert!(point.distance(v(angle.cos(), angle.sin(), 0.0)) < 5e-7);
+        }
+    }
+
+    #[test]
+    fn nurbs_division_sampling_is_bounded_and_degenerate_curves_are_finite() {
+        let curve = NurbsCurve {
+            degree: 2,
+            control_points: vec![Vec3::ZERO, v(1e6, -1e6, 0.0), Vec3::X],
+            weights: vec![1e-12, 1e12, 1e-12],
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        };
+        assert!(curve.arc_length_table().len() <= 16_385);
+        let degenerate = Curve::Nurbs(NurbsCurve::from_points(&[Vec3::X; 4], 3, false).unwrap());
+        assert!(degenerate
+            .divide(4)
+            .iter()
+            .all(|p| p.distance(Vec3::X) < 1e-12));
     }
 
     #[test]
