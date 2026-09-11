@@ -15,8 +15,8 @@ pub fn ui(ui: &mut egui::Ui, doc: &mut Document, log: &[String], errors: &mut Ve
         ui.weak(format!(
             "{} blocks · {} ops · {}",
             doc.chain.len(),
-            doc.chain.total_ops(),
-            format_bytes(doc.chain.byte_size()),
+            doc.chain_total_ops(),
+            format_bytes(doc.chain_byte_size()),
         ));
     });
     ui.separator();
@@ -69,7 +69,7 @@ pub fn ui(ui: &mut egui::Ui, doc: &mut Document, log: &[String], errors: &mut Ve
                     ellipsis,
                     b.ops.len(),
                     if b.ops.len() == 1 { "" } else { "s" },
-                    format_bytes(b.byte_size()),
+                    format_bytes(doc.block_byte_size(i)),
                 );
                 let hash_prefix: String = b.hash.chars().take(16).collect();
                 let resp = ui

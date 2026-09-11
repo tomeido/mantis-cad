@@ -82,6 +82,47 @@ pub(crate) fn curve(inputs: &[Value], i: usize, name: &str) -> Result<Arc<Curve>
         .ok_or_else(|| format!("input {name}: expected Curve, got {}", v.describe()))
 }
 
+/// Check geometry before/after operations that can amplify user input.
+/// Curve parameters are inspected directly; sampling can miss invalid data.
+pub(crate) fn finite_geometry(value: &Value) -> Result<(), String> {
+    let valid_plane =
+        |p: &Plane| p.origin.is_finite() && p.x_axis.is_finite() && p.y_axis.is_finite();
+    let valid = match value {
+        Value::Vector(v) => v.is_finite(),
+        Value::Plane(p) => valid_plane(p),
+        Value::Curve(c) => match &**c {
+            Curve::Line { a, b } => a.is_finite() && b.is_finite(),
+            Curve::Polyline { points, .. } => points.iter().all(|p| p.is_finite()),
+            Curve::Circle { plane, radius } => valid_plane(plane) && radius.is_finite(),
+            Curve::Arc {
+                plane,
+                radius,
+                start_angle,
+                end_angle,
+            } => {
+                valid_plane(plane)
+                    && radius.is_finite()
+                    && start_angle.is_finite()
+                    && end_angle.is_finite()
+            }
+            Curve::Nurbs(n) => {
+                n.control_points.iter().all(|p| p.is_finite())
+                    && n.weights.iter().all(|v| v.is_finite())
+                    && n.knots.iter().all(|v| v.is_finite())
+            }
+        },
+        Value::Mesh(m) => {
+            m.positions.iter().all(|p| p.is_finite()) && m.normals.iter().all(|p| p.is_finite())
+        }
+        _ => return Err("expected Vector/Plane/Curve/Mesh geometry".into()),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("geometry contains non-finite coordinates or parameters".into())
+    }
+}
+
 pub(crate) fn mesh(inputs: &[Value], i: usize, name: &str) -> Result<Arc<Mesh>, String> {
     let v = any(inputs, i, name)?;
     v.as_mesh()

@@ -7,6 +7,7 @@ pub mod curve;
 pub mod math;
 pub mod mesh;
 pub mod ops;
+pub mod solid;
 
 pub use curve::{Curve, NurbsCurve};
 pub use math::{BBox, Mat4, Plane, Vec3};

@@ -9,31 +9,44 @@
 //!            (add/subtract/multiply polymorphic: Number±Number, Vector±Vector,
 //!             Vector*Number ...)
 //! Sets:      series(start,step,count) · range(a,b,steps) · list_item ·
-//!            list_length · repeat
+//!            list_length · repeat · reverse_list · sort_list(list -> list,indices)
+//!            shift_list(list,shift,wrap) · cull_pattern(list,pattern)
+//!            dispatch(list,pattern -> a,b) · merge(a,b) · bounds(list -> min,max)
+//!            random(a,b,count,seed)
 //! Vector:    vector_xyz · deconstruct_vector · unit_x/y/z(factor) · distance ·
 //!            dot · cross · amplitude · rotate_vector(axis,angle) ·
 //!            xy_plane(origin) · plane_normal(origin,normal)
 //! Curve:     line(a,b) · polyline(points,closed) · circle(plane,radius) ·
 //!            arc(plane,radius,a0,a1) · nurbs_curve(points,degree,closed) ·
 //!            divide_curve(curve,n -> points) · eval_curve(curve,t -> point,
-//!            tangent) · curve_length
+//!            tangent) · curve_length · rectangle(plane,x,y) ·
+//!            end_points(curve -> start,end) · reverse_curve
 //! Surface:   extrude(curve,dir) · revolve(curve,axis origin+dir,angle) ·
 //!            loft(curves) · pipe(curve,radius) · planar_srf(curve) ·
 //!            box_mesh(plane,x,y,z) · sphere(center,radius) ·
 //!            cylinder(plane,radius,height) · cone · torus
+//!            mesh_boolean_union/difference/intersection(a,b,tolerance) ·
+//!            mesh_split_plane(mesh,plane,tolerance -> negative,positive) ·
+//!            mesh_trim_plane(mesh,plane,keep_positive,tolerance)
 //! Transform: move(geo,motion) · rotate(geo,plane,angle) ·
-//!            scale(geo,center,factor) · mirror(geo,plane)
+//!            scale(geo,center,factor) · mirror(geo,plane) ·
+//!            array_linear(geo,motion,count) · array_polar(geo,plane,count,angle)
 //!            (geo: ValueKind::Any -> Vector/Plane/Curve/Mesh)
 //! Analysis:  bbox · area · volume · mesh_info(v,f,bytes) · data_size
 //!
 //! Tessellation params where sensible are item_default inputs (segments
 //! default 32, clamped to at most 2048 to keep worst-case memory bounded).
+//! Arrays include the original, accept at most 4096 items, and reject an
+//! estimated output above 64 MiB. Angles use radians. List operations operate
+//! on flat lists; no Grasshopper data-tree paths or .gh serialization implied.
 
 mod analysis;
 mod curves;
+mod imported;
 mod maths;
 mod params;
 mod sets;
+mod solid;
 mod surface;
 mod transform;
 mod util;
@@ -86,11 +99,13 @@ impl Component for FnComponent {
 pub fn all() -> Vec<Arc<dyn Component>> {
     let mut v: Vec<Arc<dyn Component>> = Vec::new();
     v.extend(params::all());
+    v.extend(imported::all());
     v.extend(maths::all());
     v.extend(sets::all());
     v.extend(vectors::all());
     v.extend(curves::all());
     v.extend(surface::all());
+    v.extend(solid::all());
     v.extend(transform::all());
     v.extend(analysis::all());
     v

@@ -36,7 +36,7 @@ fn include_bbox(v: &Value, b: &mut BBox) -> Result<(), String> {
 }
 
 /// Approximate serialized byte size of a value (see `data_size`).
-fn approx_size(v: &Value) -> usize {
+pub(super) fn approx_size(v: &Value) -> usize {
     match v {
         Value::Null => 0,
         Value::Number(_) => 8,

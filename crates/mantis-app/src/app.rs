@@ -1,6 +1,7 @@
 //! Top-level application: workspaces, explicit sync, UI and persistence.
 
 use crate::chain_panel;
+use crate::commands::CommandPalette;
 use crate::key_backup;
 use crate::node_editor::NodeEditor;
 use crate::state::Document;
@@ -54,9 +55,40 @@ struct WorkspaceTransferDialog {
     error: String,
 }
 
+/// Equality over small metadata and a durable-operation revision replaces
+/// serializing every geometry/source archive on every animation frame.
+#[derive(PartialEq)]
+struct SaveStamp {
+    active_id: String,
+    workspaces: Vec<(String, u64)>,
+    name: String,
+    author: String,
+    public_key: String,
+    key_backup_confirmed: bool,
+    revision: u64,
+    head: String,
+    pending: usize,
+    recovery: usize,
+    url: String,
+    project: String,
+    background_check: bool,
+    remote_attached: bool,
+    remote_confirmed: bool,
+    remote_info: Option<RemoteInfo>,
+    view: ViewMetadataV1,
+}
+
 pub struct MantisApp {
     doc: Document,
     editor: NodeEditor,
+    commands: CommandPalette,
+    #[cfg(not(target_arch = "wasm32"))]
+    cad_io: crate::cad_io::CadIo,
+    show_inspector: bool,
+    export_obj_open: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    export_obj_path: String,
+    export_obj_status: String,
     viewport: ViewportPanel,
     sync: SyncClient,
     remote_attached: bool,
@@ -71,7 +103,7 @@ pub struct MantisApp {
     storage_disabled: bool,
     catalog_durability: CatalogDurability,
     corrupt_catalog: Option<String>,
-    last_observed_catalog: String,
+    last_saved_stamp: Option<SaveStamp>,
     dirty_since: Option<f64>,
     new_workspace_name: String,
     show_new_workspace: bool,
@@ -150,6 +182,14 @@ impl MantisApp {
         MantisApp {
             doc,
             editor: NodeEditor::new(),
+            commands: CommandPalette::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            cad_io: crate::cad_io::CadIo::default(),
+            show_inspector: true,
+            export_obj_open: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            export_obj_path: default_obj_export_path(),
+            export_obj_status: String::new(),
             viewport: ViewportPanel::new(),
             sync,
             remote_attached: web_remote,
@@ -164,7 +204,7 @@ impl MantisApp {
             storage_disabled: false,
             catalog_durability: CatalogDurability::default(),
             corrupt_catalog: None,
-            last_observed_catalog: String::new(),
+            last_saved_stamp: None,
             dirty_since: None,
             new_workspace_name: "Untitled".into(),
             show_new_workspace: false,
@@ -203,8 +243,7 @@ impl MantisApp {
                         Ok(()) => {
                             self.storage_ready = true;
                             self.catalog_durability.restored_catalog();
-                            self.last_observed_catalog =
-                                self.catalog_json(false).unwrap_or_default();
+                            self.last_saved_stamp = Some(self.save_stamp());
                             self.log_line("restored workspace catalog");
                         }
                         Err(error) => {
@@ -376,13 +415,54 @@ impl MantisApp {
             .map_err(|e| format!("cannot serialize workspaces: {e}"))
     }
 
+    fn save_stamp(&self) -> SaveStamp {
+        SaveStamp {
+            active_id: self.catalog.active_id.clone(),
+            workspaces: self
+                .catalog
+                .workspaces
+                .iter()
+                .map(|w| (w.id.clone(), w.updated_ms))
+                .collect(),
+            name: self.workspace_name.clone(),
+            author: self.doc.identity.name.clone(),
+            public_key: self.doc.identity.public_hex(),
+            key_backup_confirmed: self.catalog.settings.key_backup_confirmed,
+            revision: self.doc.persistence_revision(),
+            head: self.doc.chain.head().hash.clone(),
+            pending: self.doc.pending.len(),
+            recovery: self.doc.recovery_ops.len(),
+            url: self.sync.url.clone(),
+            project: self.sync.project_id.clone(),
+            background_check: self.sync.auto_pull,
+            remote_attached: self.remote_attached,
+            remote_confirmed: self.remote_connection_confirmed,
+            remote_info: self.sync.last_info.clone(),
+            view: ViewMetadataV1 {
+                viewed_block: self.doc.view_index(),
+                show_chain: self.show_chain,
+                selected_nodes: self.editor.selection.iter().copied().collect(),
+                camera: CameraMetadataV1 {
+                    target: [
+                        self.viewport.camera.target.x,
+                        self.viewport.camera.target.y,
+                        self.viewport.camera.target.z,
+                    ],
+                    distance: self.viewport.camera.distance,
+                    yaw: self.viewport.camera.yaw,
+                    pitch: self.viewport.camera.pitch,
+                },
+            },
+        }
+    }
+
     fn persist_now(&mut self) {
         if !self.storage_ready || self.storage_disabled || self.corrupt_catalog.is_some() {
             return;
         }
         match self.catalog_json(true) {
             Ok(json) => {
-                self.last_observed_catalog = json.clone();
+                self.last_saved_stamp = Some(self.save_stamp());
                 self.dirty_since = None;
                 let ticket = self.persistence.save(json);
                 self.catalog_durability.requested(ticket);
@@ -395,10 +475,12 @@ impl MantisApp {
         if !self.storage_ready || self.storage_disabled || self.corrupt_catalog.is_some() {
             return;
         }
-        let Ok(json) = self.catalog_json(false) else {
+        let stamp = self.save_stamp();
+        if self.last_saved_stamp.as_ref() == Some(&stamp) {
+            self.dirty_since = None;
             return;
-        };
-        if json != self.last_observed_catalog && self.dirty_since.is_none() {
+        }
+        if self.dirty_since.is_none() {
             self.dirty_since = Some(self.now);
         }
         if self
@@ -1371,6 +1453,19 @@ impl MantisApp {
                     self.show_recovery = true;
                 }
                 ui.separator();
+                if ui.button("Commands…").on_hover_text("Rhino-style commands · Ctrl/Cmd+K").clicked() {
+                    self.commands.show();
+                }
+                ui.toggle_value(&mut self.show_inspector, "Inputs").on_hover_text("Inspect and edit selected node inputs and outputs");
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui.button("CAD…").on_hover_text("Rhino / Grasshopper / STEP files and exact B-rep operations").clicked() {
+                    self.cad_io.open = true;
+                }
+                if ui.button("OBJ…").on_hover_text("Export visible meshes for other CAD and 3D apps").clicked() {
+                    self.export_obj_open = true;
+                    self.export_obj_status.clear();
+                }
+                ui.separator();
                 if self.doc.is_time_traveling() {
                     ui.colored_label(
                         egui::Color32::from_rgb(0xe8, 0xc0, 0x6a),
@@ -1390,6 +1485,7 @@ impl MantisApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, errors: &mut Vec<String>) {
+        self.obj_export_dialog(ctx);
         if self.show_new_workspace {
             let mut open = true;
             egui::Window::new("New workspace")
@@ -1441,6 +1537,49 @@ impl MantisApp {
         self.workspace_transfer_dialog(ctx, errors);
         self.remote_projects_dialog(ctx, errors);
         self.recovery_dialog(ctx, errors);
+    }
+
+    fn obj_export_dialog(&mut self, ctx: &egui::Context) {
+        if !self.export_obj_open {
+            return;
+        }
+        let mut open = self.export_obj_open;
+        egui::Window::new("Export OBJ").open(&mut open).default_width(430.0).show(ctx, |ui| {
+            ui.label("Export all visible meshes as a Wavefront OBJ file.");
+            ui.weak("Curves and points are not included. Use ExtrudeCrv, Pipe or PlanarSrf to create meshes. Disable previews to omit objects.");
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                ui.label("Save path (new file):");
+                ui.add(egui::TextEdit::singleline(&mut self.export_obj_path).desired_width(f32::INFINITY));
+                if ui.button("Save OBJ").clicked() {
+                    let result = crate::commands::visible_mesh_obj(&mut self.doc).and_then(|payload| {
+                        use std::io::Write as _;
+                        let path = std::path::PathBuf::from(self.export_obj_path.trim());
+                        if path.as_os_str().is_empty() { return Err("Enter a file path.".into()); }
+                        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+                            .map_err(|e| format!("Cannot create {}: {e}. Choose a new filename.", path.display()))?;
+                        file.write_all(payload.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| format!("Cannot save OBJ: {e}"))?;
+                        Ok(format!("Saved {} ({}).", path.display(), format_bytes(payload.len())))
+                    });
+                    self.export_obj_status = result.unwrap_or_else(|error| error);
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            if ui.button("Download OBJ").clicked() {
+                self.export_obj_status = match crate::commands::visible_mesh_obj(&mut self.doc).and_then(|payload| crate::commands::download_obj(&payload)) {
+                    Ok(()) => "Download started: mantis-model.obj".into(),
+                    Err(error) => error,
+                };
+            }
+            if ui.button("Copy OBJ text").clicked() {
+                match crate::commands::visible_mesh_obj(&mut self.doc) {
+                    Ok(payload) => { ui.ctx().copy_text(payload); self.export_obj_status = "OBJ copied to clipboard.".into(); }
+                    Err(error) => self.export_obj_status = error,
+                }
+            }
+            if !self.export_obj_status.is_empty() { ui.label(&self.export_obj_status); }
+        });
+        self.export_obj_open = open;
     }
 
     fn remote_projects_dialog(&mut self, ctx: &egui::Context, errors: &mut Vec<String>) {
@@ -1792,22 +1931,15 @@ impl MantisApp {
     }
 
     fn stats_label(&self) -> String {
-        let chain_bytes = self.doc.chain.byte_size();
+        let chain_bytes = self.doc.chain_byte_size();
         let geometry_bytes = self.viewport.geometry_bytes();
-        let mut value = format!(
-            "{} blocks · {} ops · {} on chain ↔ {} geometry",
+        format!(
+            "{} blocks · {} committed ops · {} committed data · {} preview geometry",
             self.doc.chain.len(),
-            self.doc.chain.total_ops(),
+            self.doc.chain_total_ops(),
             format_bytes(chain_bytes),
             format_bytes(geometry_bytes),
-        );
-        if geometry_bytes > 0 && chain_bytes > 0 {
-            let ratio = geometry_bytes as f64 / chain_bytes as f64;
-            if ratio >= 1.0 {
-                value.push_str(&format!(" ({ratio:.0}× lighter)"));
-            }
-        }
-        value
+        )
     }
 }
 
@@ -1834,7 +1966,18 @@ impl eframe::App for MantisApp {
         }
 
         self.doc.evaluate();
+        self.commands.shortcut(ctx);
         self.top_bar(ctx, &mut errors);
+        if self.show_inspector {
+            egui::SidePanel::left("mantis_inspector")
+                .resizable(true)
+                .default_width(210.0)
+                .min_width(160.0)
+                .max_width(360.0)
+                .show(ctx, |ui| {
+                    self.editor.inspector_ui(ui, &mut self.doc, &mut errors)
+                });
+        }
         if self.show_chain {
             egui::SidePanel::right("mantis_chain_panel")
                 .resizable(true)
@@ -1872,8 +2015,25 @@ impl eframe::App for MantisApp {
         }
 
         self.dialogs(ctx, &mut errors);
+        if let Some(result) = self.commands.ui(ctx, &mut self.doc, &self.editor.selection) {
+            self.editor.selection = result.selection;
+            self.editor.focus_selection(&self.doc);
+            self.toast(result.message, false);
+            ctx.request_repaint();
+        }
         for error in errors {
             self.toast(error, true);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(selection) = self.cad_io.ui(
+            ctx,
+            &mut self.doc,
+            &self.editor.selection,
+            &self.catalog.active_id,
+        ) {
+            self.editor.selection = selection;
+            self.editor.focus_selection(&self.doc);
+            ctx.request_repaint();
         }
         self.autosave(ctx);
         self.show_toasts(ctx);
@@ -1902,6 +2062,26 @@ impl eframe::App for MantisApp {
             viewport::destroy_gl(&self.viewport.shared, gl);
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_obj_export_path() -> String {
+    if let Some(user_directory) = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+    {
+        let downloads = user_directory.join("Downloads");
+        let directory = if downloads.is_dir() {
+            downloads
+        } else {
+            user_directory
+        };
+        return directory
+            .join("mantis-model.obj")
+            .to_string_lossy()
+            .into_owned();
+    }
+    "mantis-model.obj".into()
 }
 
 fn nonempty_name(value: &str) -> String {

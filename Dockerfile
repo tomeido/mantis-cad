@@ -4,7 +4,7 @@ ARG TRUNK_VERSION=0.21.14
 ARG MANTIS_WEB_BASE_PATH=""
 ARG MANTIS_WEB_PUBLIC_URL=/
 
-FROM --platform=$BUILDPLATFORM rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS web-builder
+FROM --platform=$BUILDPLATFORM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS web-builder
 
 ARG TRUNK_VERSION
 WORKDIR /src
@@ -28,7 +28,7 @@ RUN --mount=type=cache,id=mantis-web-registry,target=/usr/local/cargo/registry,s
       --dist /out/dist \
       --public-url "${MANTIS_WEB_PUBLIC_URL}"
 
-FROM rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS server-builder
+FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS server-builder
 
 ARG MANTIS_GIT_SHA=unknown
 ARG TARGETARCH
@@ -43,7 +43,7 @@ RUN --mount=type=cache,id=mantis-native-registry-${TARGETARCH},target=/usr/local
     && install -Dm755 target/release/mantis-server /out/bin/mantis-server \
     && install -Dm755 target/release/mantis-admin /out/bin/mantis-admin
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 
 ARG MANTIS_GIT_SHA=unknown
 
@@ -66,6 +66,8 @@ COPY --from=server-builder --chown=root:root /out/bin/mantis-server /usr/local/b
 COPY --from=server-builder --chown=root:root /out/bin/mantis-admin /usr/local/bin/mantis-admin
 COPY --from=web-builder --chown=root:root /out/dist/ /app/dist/
 COPY --chown=root:root LICENSE /usr/share/licenses/mantis-cad/LICENSE
+COPY --chown=root:root crates/mantis-kernel/THIRD_PARTY_LICENSES.md /usr/share/licenses/mantis-cad/THIRD_PARTY_LICENSES.md
+COPY --chown=root:root crates/mantis-kernel/THIRD_PARTY_LICENSES.md /app/dist/THIRD_PARTY_LICENSES.md
 
 ENV PORT=7878 \
     MANTIS_DATA_DIR=/data \

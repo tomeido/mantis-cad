@@ -1,11 +1,12 @@
 //! mantis-graph — Grasshopper-style dataflow engine for MantisCAD.
 //!
-//! Deterministic: no HashMap in eval/serialization paths, no randomness,
-//! no clock. Must compile on wasm32.
+//! Deterministic: no HashMap in eval/serialization paths, no unseeded
+//! randomness, no clock. Must compile on wasm32.
 
 pub mod component;
 pub mod components;
 pub mod eval;
+pub mod geometry;
 pub mod graph;
 pub mod value;
 
