@@ -1,5 +1,12 @@
 /target
 dist/
+/dist-downloads/
+/packaging/__pycache__/
+/interop/.venv/
+/interop/__pycache__/
+/interop/tests/__pycache__/
+/interop/grasshopper/bin/
+/interop/grasshopper/obj/
 /mantis-data/
 *.identity.json
 *.mantis-key

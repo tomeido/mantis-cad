@@ -39,6 +39,8 @@ const FROZEN_TYPE_NAMES: &[&str] = &[
     "panel",
     "point_xyz",
     "pi_const",
+    "imported_geometry",
+    "constant_list",
     // Maths
     "add",
     "subtract",
@@ -60,6 +62,14 @@ const FROZEN_TYPE_NAMES: &[&str] = &[
     "list_item",
     "list_length",
     "repeat",
+    "reverse_list",
+    "sort_list",
+    "shift_list",
+    "cull_pattern",
+    "dispatch",
+    "merge",
+    "bounds",
+    "random",
     // Vector
     "vector_xyz",
     "deconstruct_vector",
@@ -82,6 +92,9 @@ const FROZEN_TYPE_NAMES: &[&str] = &[
     "divide_curve",
     "eval_curve",
     "curve_length",
+    "rectangle",
+    "end_points",
+    "reverse_curve",
     // Surface
     "extrude",
     "revolve",
@@ -93,11 +106,18 @@ const FROZEN_TYPE_NAMES: &[&str] = &[
     "cylinder",
     "cone",
     "torus",
+    "mesh_boolean_union",
+    "mesh_boolean_difference",
+    "mesh_boolean_intersection",
+    "mesh_split_plane",
+    "mesh_trim_plane",
     // Transform
     "move",
     "rotate",
     "scale",
     "mirror",
+    "array_linear",
+    "array_polar",
     // Analysis
     "bbox",
     "area",
@@ -119,7 +139,8 @@ fn registry_contains_all_frozen_type_names() {
         // Port specs must be constructible without panicking.
         let _ = (c.inputs(), c.outputs());
     }
-    assert_eq!(FROZEN_TYPE_NAMES.len(), 63);
+    assert_eq!(FROZEN_TYPE_NAMES.len(), 83);
+    assert_eq!(reg.iter().count(), FROZEN_TYPE_NAMES.len());
 }
 
 #[test]

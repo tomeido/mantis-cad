@@ -11,17 +11,20 @@ crates/
   mantis-kernel   pure geometry: Vec3/Mat4/Plane, Curve, Mesh, extrude/revolve/loft/pipe
   mantis-graph    node engine: Value, Component registry, Graph, GraphOp, deterministic eval
   mantis-chain    op-log blockchain: Block{ops}, sha256 links, ed25519 sigs, replay -> Graph
+  mantis-history  committed revision diff: net Graph changes + current preview geometry
   mantis-protocol versioned project/access/sync/workspace contracts shared by every client
   mantis-app      eframe GUI: glow 3D viewport + hand-rolled node editor + chain panel (native+wasm)
   mantis-server   tiny_http: chain sync/audit API + static hosting of the wasm build
   mantis-admin    operator/owner CLI for projects, membership, export, verify, and migration
-  mantis-cli      headless: agent discovery/edit/audit + replay / export OBJ / demo
+  mantis-cli      headless: agent discovery/edit/audit + revision diff / replay / export OBJ / demo
 ```
 
-Dependency DAG: kernel ← graph ← chain ← protocol ← {app, server, admin}, with
-`cli` using the lower graph/chain layers directly. Lower crates MUST NOT depend
-on higher ones. kernel/graph/chain/protocol must compile for wasm32 (no threads,
-no std::net, no filesystem in library code paths).
+Dependency DAG: kernel ← graph ← chain. `history` consumes kernel, graph,
+and chain; `protocol` consumes graph and chain; app/server/admin consume the
+protocol and core layers, while `cli` consumes history and the core layers
+directly. Lower crates MUST NOT depend on their consumers.
+kernel/graph/chain/history/protocol must compile for wasm32 (no threads, no
+std::net, no filesystem in library code paths).
 
 ## Iron rules (determinism)
 
@@ -40,8 +43,11 @@ no std::net, no filesystem in library code paths).
 
 ## Cross-crate API contract
 
-The stub sources in each crate are the authoritative signatures. Implement
-bodies; do **not** change existing public signatures (adding new items is fine).
+The implemented public APIs and versioned JSON/wire formats are the
+authoritative contracts. Changes must preserve existing public signatures,
+serialized enum/field shapes, chain replay, and block-hash compatibility unless
+an explicit version migration is provided. New cross-crate behavior requires
+deterministic tests in the owning crate and at least one boundary consumer.
 
 ### Data model summary
 
@@ -54,6 +60,13 @@ bodies; do **not** change existing public signatures (adding new items is fine).
 - `Block`: index, prev_hash(hex sha256), timestamp_ms, author, author_pk(hex),
   message, ops, hash, sig. `hash = sha256(canonical json of signable fields)`,
   `sig = ed25519(hash bytes)`.
+- `HistoryDiff` (history): validates the complete chain, treats revisions as
+  block indices, preserves commits in `(from, to]`, and reports the net graph
+  snapshot delta. It re-evaluates both graphs with `Registry::standard()` and
+  compares preview-enabled point/curve/mesh outputs. This geometry and its
+  fingerprints are derived evidence, not signed chain state. JSON reports carry
+  `schema_version`; callers must handle `incomplete` rather than interpreting it
+  as unchanged geometry.
 - Commit model is git-like: UI edits accumulate as pending ops applied live to
   the working graph; "Commit" seals them into a signed block; push/pull sync
   with the server; on divergence the client pulls, replays, and re-applies

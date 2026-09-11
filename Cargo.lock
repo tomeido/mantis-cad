@@ -847,13 +847,13 @@ dependencies = [
 
 [[package]]
 name = "ehttp"
-version = "0.5.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59a81c221a1e4dad06cb9c9deb19aea1193a5eea084e8cd42d869068132bf876"
+checksum = "b2f1b93eb2e039aaff63ce07cca59bd1dca02f2ce30075a17b619d2c42f56efc"
 dependencies = [
  "document-features",
  "js-sys",
- "ureq 2.12.1",
+ "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1605,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-admin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1616,13 +1616,13 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
- "ureq 3.4.0",
+ "ureq",
  "url",
 ]
 
 [[package]]
 name = "mantis-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1639,6 +1639,7 @@ dependencies = [
  "mantis-graph",
  "mantis-kernel",
  "mantis-protocol",
+ "quick-xml",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -1648,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-chain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -1661,17 +1662,18 @@ dependencies = [
 
 [[package]]
 name = "mantis-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mantis-chain",
  "mantis-graph",
+ "mantis-history",
  "mantis-kernel",
  "serde_json",
 ]
 
 [[package]]
 name = "mantis-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mantis-kernel",
  "serde",
@@ -1679,8 +1681,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mantis-history"
+version = "0.2.0"
+dependencies = [
+ "mantis-chain",
+ "mantis-graph",
+ "mantis-kernel",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "mantis-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1688,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -1702,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "mantis-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -2652,9 +2666,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.150"
+version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
  "itoa",
  "memchr",
@@ -3110,22 +3124,6 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "2.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "log",
- "once_cell",
- "rustls",
- "rustls-pki-types",
- "url",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "ureq"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "972d7902c8735f2695410b8aed7df6ed12a47394aa1c8d7af49f0497b731a94d"
@@ -3141,7 +3139,7 @@ dependencies = [
  "serde_json",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.8",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -3435,15 +3433,6 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "url",
  "web-sys",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.8",
 ]
 
 [[package]]

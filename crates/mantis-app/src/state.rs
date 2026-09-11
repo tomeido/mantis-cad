@@ -9,7 +9,16 @@ use mantis_graph::{
     EvalOutput, Evaluator, Graph, GraphError, GraphOp, NodeId, ParamValue, Registry,
 };
 use mantis_protocol::ChainId;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+
+#[derive(Default)]
+struct ChainSizes {
+    head: String,
+    blocks: Vec<usize>,
+    block_bytes: usize,
+    ops: usize,
+}
 
 /// An in-flight interactive gesture whose intermediate states must NOT be
 /// recorded as ops.
@@ -46,10 +55,11 @@ pub struct Document {
     /// Pending operations that could not be replayed after a remote update.
     /// Kept separately so a conflict is recoverable instead of silently lost.
     pub recovery_ops: Vec<GraphOp>,
-    /// Pending-op snapshots before each user edit. History deliberately stops
-    /// at a commit: immutable chain blocks are never rewritten by Undo.
-    undo_history: Vec<Vec<GraphOp>>,
-    /// Pending-op snapshots removed by Undo and available to Redo.
+    /// Pending-op offsets before each user edit. The ledger is append-only
+    /// between commits, so offsets avoid quadratic copies of the entire log.
+    /// History stops at a commit: signed blocks are never rewritten by Undo.
+    undo_history: Vec<usize>,
+    /// Only the operation batches removed by Undo, available to Redo.
     redo_history: Vec<Vec<GraphOp>>,
     pub evaluator: Evaluator,
     pub registry: Registry,
@@ -64,6 +74,14 @@ pub struct Document {
     /// Set whenever displayed geometry may have changed; the viewport drains
     /// it to rebuild GPU batches.
     scene_dirty: bool,
+    /// Navigation and layout frames reuse the complete evaluated output,
+    /// including lists, without traversing or cloning the graph's cache.
+    eval_dirty: bool,
+    /// Changes to the durable operation ledger. Live gesture frames do not
+    /// count until their final operation is recorded.
+    persistence_revision: u64,
+    /// Signed blocks are immutable; their JSON sizes need measuring once.
+    chain_sizes: RefCell<ChainSizes>,
 }
 
 impl Document {
@@ -98,6 +116,9 @@ impl Document {
             view_graph: None,
             gesture: None,
             scene_dirty: true,
+            eval_dirty: true,
+            persistence_revision: 0,
+            chain_sizes: RefCell::default(),
         }
     }
 
@@ -134,6 +155,9 @@ impl Document {
             view_graph: None,
             gesture: None,
             scene_dirty: true,
+            eval_dirty: true,
+            persistence_revision: 0,
+            chain_sizes: RefCell::default(),
         };
         doc.set_view(view_index)?;
         Ok(doc)
@@ -164,6 +188,58 @@ impl Document {
 
     pub fn view_index(&self) -> Option<usize> {
         self.view_index
+    }
+
+    pub fn persistence_revision(&self) -> u64 {
+        self.persistence_revision
+    }
+
+    fn persisted_change(&mut self) {
+        self.persistence_revision = self.persistence_revision.wrapping_add(1);
+    }
+
+    fn cache_chain_sizes(&self) {
+        let head = &self.chain.head().hash;
+        let mut sizes = self.chain_sizes.borrow_mut();
+        if sizes.head == *head {
+            return;
+        }
+        let previous = sizes.blocks.len();
+        let extends = previous > 0
+            && previous <= self.chain.len()
+            && self.chain.blocks[previous - 1].hash == sizes.head;
+        if !extends {
+            *sizes = ChainSizes::default();
+        }
+        for block in &self.chain.blocks[sizes.blocks.len()..] {
+            let bytes = block.byte_size();
+            sizes.blocks.push(bytes);
+            sizes.block_bytes += bytes;
+            sizes.ops += block.ops.len();
+        }
+        sizes.head.clone_from(head);
+    }
+
+    pub fn chain_byte_size(&self) -> usize {
+        self.cache_chain_sizes();
+        let sizes = self.chain_sizes.borrow();
+        // Compact Chain JSON is {"blocks":[...]}: empty wrapper + values + commas.
+        b"{\"blocks\":[]}".len() + sizes.block_bytes + sizes.blocks.len().saturating_sub(1)
+    }
+
+    pub fn chain_total_ops(&self) -> usize {
+        self.cache_chain_sizes();
+        self.chain_sizes.borrow().ops
+    }
+
+    pub fn block_byte_size(&self, index: usize) -> usize {
+        self.cache_chain_sizes();
+        self.chain_sizes
+            .borrow()
+            .blocks
+            .get(index)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Whether this document has no authored work and may safely adopt the
@@ -197,6 +273,7 @@ impl Document {
             }
         }
         self.evaluator.invalidate_all();
+        self.eval_dirty = true;
         self.scene_dirty = true;
         Ok(())
     }
@@ -207,8 +284,12 @@ impl Document {
 
     /// Evaluate the displayed graph (cached — cheap when nothing changed).
     pub fn evaluate(&mut self) {
+        if !self.eval_dirty {
+            return;
+        }
         let graph = self.view_graph.as_ref().unwrap_or(&self.graph);
         self.last_eval = self.evaluator.evaluate(graph, &self.registry);
+        self.eval_dirty = false;
     }
 
     /// True once if displayed geometry may have changed since the last call.
@@ -221,6 +302,7 @@ impl Document {
     #[allow(dead_code)]
     pub fn mark_scene_dirty(&mut self) {
         self.scene_dirty = true;
+        self.eval_dirty = true;
     }
 
     // ------------------------------------------------------------------
@@ -237,6 +319,7 @@ impl Document {
         self.record_history_boundary();
         self.invalidate_for(&op);
         self.pending.push(op);
+        self.persisted_change();
         Ok(())
     }
 
@@ -260,11 +343,12 @@ impl Document {
         }
         let count = ops.len();
         self.pending.extend(ops);
+        self.persisted_change();
         Ok(count)
     }
 
     fn record_history_boundary(&mut self) {
-        self.undo_history.push(self.pending.clone());
+        self.undo_history.push(self.pending.len());
         self.redo_history.clear();
     }
 
@@ -277,6 +361,9 @@ impl Document {
     }
 
     fn invalidate_for(&mut self, op: &GraphOp) {
+        if !matches!(op, GraphOp::MoveNode { .. }) {
+            self.eval_dirty = true;
+        }
         match op {
             GraphOp::MoveNode { .. } => {} // layout only: no eval, no scene
             GraphOp::RemoveNode { .. } => {
@@ -330,20 +417,19 @@ impl Document {
             .undo_history
             .pop()
             .ok_or_else(|| "nothing uncommitted to undo".to_string())?;
-        let current = self.pending.clone();
-        let removed = current.len().saturating_sub(previous.len());
-        let graph = match self.replay_pending(&previous) {
+        let graph = match self.replay_pending(&self.pending[..previous]) {
             Ok(graph) => graph,
             Err(e) => {
                 self.undo_history.push(previous);
                 return Err(e);
             }
         };
-        self.pending = previous;
+        let removed = self.pending.split_off(previous);
+        let count = removed.len();
         self.graph = graph;
-        self.redo_history.push(current);
+        self.redo_history.push(removed);
         self.invalidate_after_history_move();
-        Ok(removed)
+        Ok(count)
     }
 
     /// Redo one uncommitted user edit. Returns the number of GraphOps restored.
@@ -356,17 +442,17 @@ impl Document {
             .redo_history
             .pop()
             .ok_or_else(|| "nothing to redo".to_string())?;
-        let current = self.pending.clone();
-        let restored = next.len().saturating_sub(current.len());
-        let graph = match self.replay_pending(&next) {
+        let previous_len = self.pending.len();
+        let restored = next.len();
+        self.pending.extend(next);
+        let graph = match self.replay_pending(&self.pending) {
             Ok(graph) => graph,
             Err(e) => {
-                self.redo_history.push(next);
+                self.redo_history.push(self.pending.split_off(previous_len));
                 return Err(e);
             }
         };
-        self.undo_history.push(current);
-        self.pending = next;
+        self.undo_history.push(previous_len);
         self.graph = graph;
         self.invalidate_after_history_move();
         Ok(restored)
@@ -384,7 +470,9 @@ impl Document {
     }
 
     fn invalidate_after_history_move(&mut self) {
+        self.persisted_change();
         self.evaluator.invalidate_all();
+        self.eval_dirty = true;
         self.scene_dirty = true;
     }
 
@@ -450,6 +538,7 @@ impl Document {
                 key,
                 value: last,
             });
+            self.persisted_change();
         }
     }
 
@@ -509,6 +598,7 @@ impl Document {
             if !ops.is_empty() {
                 self.record_history_boundary();
                 self.pending.extend(ops);
+                self.persisted_change();
             }
         }
     }
@@ -553,6 +643,7 @@ impl Document {
         self.pending.clear();
         self.undo_history.clear();
         self.redo_history.clear();
+        self.persisted_change();
         Ok(count)
     }
 
@@ -588,7 +679,9 @@ impl Document {
         // Leave any time-travel view in place (indices are still valid: the
         // chain only grew), but refresh everything.
         self.evaluator.invalidate_all();
+        self.eval_dirty = true;
         self.scene_dirty = true;
+        self.persisted_change();
         Ok(MergeReport { appended, dropped })
     }
 
@@ -615,7 +708,9 @@ impl Document {
         self.view_index = None;
         self.view_graph = None;
         self.evaluator.invalidate_all();
+        self.eval_dirty = true;
         self.scene_dirty = true;
+        self.persisted_change();
         Ok(len)
     }
 }
@@ -627,6 +722,79 @@ mod tests {
 
     fn doc(name: &str) -> Document {
         Document::new(Identity::generate(name))
+    }
+
+    #[test]
+    fn persistence_revision_tracks_ledger_changes_and_finished_gestures() {
+        let mut d = doc("revision");
+        let mut revision = d.persistence_revision();
+        add(&mut d, 1, "number_slider");
+        assert!(d.persistence_revision() > revision);
+        revision = d.persistence_revision();
+        d.param_drag(nid(1), "value", ParamValue::Number(7.0));
+        d.evaluate();
+        d.take_scene_dirty();
+        assert_eq!(d.persistence_revision(), revision);
+        d.end_param_drag();
+        assert!(d.persistence_revision() > revision);
+        revision = d.persistence_revision();
+        d.param_drag(nid(1), "value", ParamValue::Number(8.0));
+        d.param_drag(nid(1), "value", ParamValue::Number(7.0));
+        d.end_param_drag();
+        assert_eq!(d.persistence_revision(), revision);
+        d.begin_move([nid(1)]);
+        d.move_live(nid(1), (17.0, 9.0));
+        assert_eq!(d.persistence_revision(), revision);
+        d.end_move();
+        assert!(d.persistence_revision() > revision);
+        revision = d.persistence_revision();
+        d.undo_pending().unwrap();
+        assert!(d.persistence_revision() > revision);
+        revision = d.persistence_revision();
+        d.redo_pending().unwrap();
+        assert!(d.persistence_revision() > revision);
+        revision = d.persistence_revision();
+        assert!(d.apply_op(GraphOp::RemoveNode { id: nid(999) }).is_err());
+        assert_eq!(d.persistence_revision(), revision);
+        d.commit("saved", 1).unwrap();
+        assert!(d.persistence_revision() > revision);
+        revision = d.persistence_revision();
+        d.merge_remote(&[]).unwrap();
+        assert_eq!(d.persistence_revision(), revision);
+    }
+
+    #[test]
+    fn cached_chain_sizes_match_serialization_after_append_restore_and_remote_merge() {
+        let mut d = doc("sizes");
+        assert_eq!(d.chain_byte_size(), d.chain.byte_size());
+        add(&mut d, 1, "number_slider");
+        d.set_param(nid(1), "data", ParamValue::Text("payload".repeat(1000)))
+            .unwrap();
+        d.commit("payload", 1).unwrap();
+        let check = |d: &Document| {
+            assert_eq!(d.chain_byte_size(), d.chain.byte_size());
+            assert_eq!(d.chain_total_ops(), d.chain.total_ops());
+            for (index, block) in d.chain.blocks.iter().enumerate() {
+                assert_eq!(d.block_byte_size(index), block.byte_size());
+            }
+        };
+        check(&d);
+        let mut restored = Document::restore(
+            Identity::generate("restored"),
+            d.chain.clone(),
+            vec![],
+            vec![],
+            None,
+        )
+        .unwrap();
+        check(&restored);
+        let revision = restored.persistence_revision();
+        add(&mut d, 2, "bool_toggle");
+        d.commit("next", 2).unwrap();
+        check(&d);
+        restored.merge_remote(&d.chain.blocks[2..]).unwrap();
+        assert!(restored.persistence_revision() > revision);
+        check(&restored);
     }
 
     fn nid(n: u128) -> NodeId {
@@ -699,6 +867,105 @@ mod tests {
         })
         .unwrap();
         assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn many_edits_undo_and_redo_in_order_without_losing_batches() {
+        let mut d = doc("a");
+        add(&mut d, 1, "number_slider");
+        d.set_param(nid(1), "max", ParamValue::Number(200.0))
+            .unwrap();
+        d.commit("base", 1).unwrap();
+        for value in 1..=200 {
+            d.apply_ops(vec![
+                GraphOp::SetParam {
+                    id: nid(1),
+                    key: "value".into(),
+                    value: ParamValue::Number(value as f64),
+                },
+                GraphOp::MoveNode {
+                    id: nid(1),
+                    pos: (value as f32, 0.0),
+                },
+            ])
+            .unwrap();
+        }
+        let expected = d.graph.clone();
+        for _ in 0..200 {
+            assert_eq!(d.undo_pending().unwrap(), 2);
+        }
+        assert_eq!(d.graph, d.chain.replay(None).unwrap());
+        assert!(d.pending.is_empty());
+        for value in 1..=200 {
+            assert_eq!(d.redo_pending().unwrap(), 2);
+            d.evaluate();
+            assert_eq!(
+                d.last_eval.outputs[&nid(1)][0].as_number(),
+                Some(value as f64)
+            );
+        }
+        assert_eq!(d.graph, expected);
+        assert_eq!(
+            d.chain.len(),
+            2,
+            "Undo/Redo must not rewrite signed history"
+        );
+    }
+
+    #[test]
+    fn edits_after_restore_undo_to_the_restored_pending_base() {
+        let mut original = doc("a");
+        add(&mut original, 1, "number_slider");
+        let mut restored = Document::restore(
+            Identity::from_secret_hex(&original.identity.name, &original.identity.secret_hex())
+                .unwrap(),
+            original.chain.clone(),
+            original.pending.clone(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        restored
+            .set_param(nid(1), "value", ParamValue::Number(7.0))
+            .unwrap();
+        restored.undo_pending().unwrap();
+        assert_eq!(restored.graph, original.graph);
+        assert_eq!(restored.pending, original.pending);
+        assert!(!restored.can_undo());
+        restored.redo_pending().unwrap();
+        restored.evaluate();
+        assert_eq!(
+            restored.last_eval.outputs[&nid(1)][0].as_number(),
+            Some(7.0)
+        );
+    }
+
+    #[test]
+    fn evaluation_follows_geometry_edits_history_and_live_gestures() {
+        let mut d = doc("a");
+        add(&mut d, 1, "number_slider");
+        d.set_param(nid(1), "value", ParamValue::Number(2.0))
+            .unwrap();
+        d.commit("two", 1).unwrap();
+        d.evaluate();
+        d.apply_op(GraphOp::MoveNode {
+            id: nid(1),
+            pos: (10.0, 20.0),
+        })
+        .unwrap();
+        d.evaluate();
+        assert_eq!(d.last_eval.outputs[&nid(1)][0].as_number(), Some(2.0));
+        d.param_drag(nid(1), "value", ParamValue::Number(7.0));
+        d.evaluate();
+        assert_eq!(d.last_eval.outputs[&nid(1)][0].as_number(), Some(7.0));
+        d.end_gesture();
+        d.commit("seven", 2).unwrap();
+        d.set_view(Some(1)).unwrap();
+        d.evaluate();
+        assert_eq!(d.last_eval.outputs[&nid(1)][0].as_number(), Some(2.0));
+        d.set_view(None).unwrap();
+        d.evaluate();
+        assert_eq!(d.last_eval.outputs[&nid(1)][0].as_number(), Some(7.0));
     }
 
     #[test]

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=MantisCAD
+Comment=Lightweight parametric 3D CAD
+Exec=mantis-cad
+Icon=mantis-cad
+Terminal=false
+Categories=Graphics;3DGraphics;Engineering;
+StartupWMClass=mantis-app

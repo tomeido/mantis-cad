@@ -7,7 +7,7 @@
 
 use crate::state::Document;
 use crate::util::new_node_id;
-use mantis_graph::{Edge, GraphOp, NodeId, ParamValue, ValueKind};
+use mantis_graph::{Edge, GraphOp, Node, NodeId, ParamValue, Value, ValueKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Zoom limits.
@@ -32,6 +32,38 @@ const ERROR: egui::Color32 = egui::Color32::from_rgb(0xe8, 0x5a, 0x50);
 const TEXT: egui::Color32 = egui::Color32::from_rgb(0xd8, 0xdc, 0xe4);
 const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(0xa0, 0xa6, 0xb0);
 const BANNER: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xc0, 0x6a);
+
+/// The inspector can mutate the document after taking this tiny snapshot.
+/// CAD source archives and stored lists never need copying into UI state.
+fn inspector_node(node: &Node) -> Node {
+    Node {
+        id: node.id,
+        type_name: node.type_name.clone(),
+        pos: node.pos,
+        params: ["value", "min", "max", "step", "__preview"]
+            .into_iter()
+            .filter_map(|key| match node.params.get(key) {
+                Some(value @ (ParamValue::Number(_) | ParamValue::Bool(_))) => {
+                    Some((key.to_string(), value.clone()))
+                }
+                _ => None,
+            })
+            .collect(),
+    }
+}
+
+fn value_summary(value: &Value) -> String {
+    if let Value::Text(text) = value {
+        let mut chars = text.chars();
+        let mut summary: String = chars.by_ref().take(240).collect();
+        if chars.next().is_some() {
+            summary.push('…');
+        }
+        summary
+    } else {
+        value.describe()
+    }
+}
 
 /// Wire/port color for a value kind (Any = gray).
 pub fn kind_color(kind: ValueKind) -> egui::Color32 {
@@ -202,6 +234,215 @@ impl NodeEditor {
             wire_drag: None,
             add_menu: None,
         }
+    }
+
+    pub fn focus_selection(&mut self, doc: &Document) {
+        if let Some(node) = self
+            .selection
+            .iter()
+            .find_map(|id| doc.display_graph().nodes.get(id))
+        {
+            self.zoom = 0.85;
+            self.pan = egui::vec2(40.0 - node.pos.0 * self.zoom, 30.0 - node.pos.1 * self.zoom);
+        }
+    }
+
+    /// Input defaults become ordinary wired controls when edited. Existing
+    /// slider connections are edited in place; other wires stay inspectable.
+    pub fn inspector_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &mut Document,
+        errors: &mut Vec<String>,
+    ) {
+        ui.heading("Inputs & outputs");
+        let Some(id) = self
+            .selection
+            .iter()
+            .find(|id| doc.display_graph().nodes.contains_key(id))
+            .copied()
+        else {
+            ui.weak("Select a node to edit its inputs and inspect results.");
+            ui.separator();
+            ui.label("Start with Commands…");
+            ui.monospace("Circle 5");
+            ui.monospace("Box 10 20 30");
+            ui.weak("Ctrl / Cmd + K");
+            ui.separator();
+            ui.weak("Select geometry, then run Move, ExtrudeCrv, Divide or Length. Shift-click selects several nodes.");
+            return;
+        };
+        let node = inspector_node(&doc.display_graph().nodes[&id]);
+        let Some(component) = doc.registry.get(&node.type_name).cloned() else {
+            return;
+        };
+        ui.label(egui::RichText::new(component.label()).strong());
+        if self.selection.len() > 1 {
+            ui.weak(format!(
+                "{} selected; showing one node",
+                self.selection.len()
+            ));
+        }
+        let mut preview = node.preview();
+        if ui
+            .add_enabled(
+                doc.editable(),
+                egui::Checkbox::new(&mut preview, "Preview geometry"),
+            )
+            .changed()
+        {
+            if let Err(error) = doc.set_param(id, "__preview", ParamValue::Bool(preview)) {
+                errors.push(error);
+            }
+        }
+        if ui.small_button("Locate in graph").clicked() {
+            self.focus_selection(doc);
+        }
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if node.type_name == "number_slider" {
+                for (key, default) in [("value", 5.0), ("min", 0.0), ("max", 10.0), ("step", 0.0)] {
+                    let mut value = node
+                        .params
+                        .get(key)
+                        .and_then(ParamValue::as_number)
+                        .unwrap_or(default);
+                    ui.horizontal(|ui| {
+                        ui.label(key);
+                        let response = ui.add_enabled(
+                            doc.editable(),
+                            egui::DragValue::new(&mut value).speed(0.1),
+                        );
+                        if response.changed() && value.is_finite() {
+                            doc.param_drag(id, key, ParamValue::Number(value));
+                        }
+                        if response.drag_stopped() || response.lost_focus() {
+                            doc.end_param_drag();
+                        }
+                    });
+                }
+                ui.weak("Value is limited by min/max. Step 0 is continuous.");
+            }
+            for (port, spec) in component.inputs().iter().enumerate() {
+                ui.push_id((id.0, port), |ui| {
+                    let edge = doc.display_graph().incoming((id, port as u16)).copied();
+                    let value = edge
+                        .and_then(|e| doc.last_eval.outputs.get(&e.from.0)?.get(e.from.1 as usize))
+                        .or(spec.default.as_ref());
+                    let number = value.and_then(Value::as_number);
+                    let description = value
+                        .map(value_summary)
+                        .unwrap_or_else(|| "Connect an input".into());
+                    let slider = edge
+                        .and_then(|e| doc.display_graph().nodes.get(&e.from.0))
+                        .filter(|n| n.type_name == "number_slider")
+                        .map(inspector_node);
+                    ui.label(egui::RichText::new(spec.name).strong());
+                    match (number, &slider, edge) {
+                        (Some(value), slider, edge) if slider.is_some() || edge.is_none() => {
+                            let mut value = value;
+                            let mut control =
+                                egui::DragValue::new(&mut value).speed(0.1).max_decimals(5);
+                            if let Some(slider) = slider {
+                                let min = slider
+                                    .params
+                                    .get("min")
+                                    .and_then(ParamValue::as_number)
+                                    .unwrap_or(0.0);
+                                let max = slider
+                                    .params
+                                    .get("max")
+                                    .and_then(ParamValue::as_number)
+                                    .unwrap_or(10.0);
+                                control = control.range(min.min(max)..=min.max(max));
+                            }
+                            let response = ui.add_enabled(doc.editable(), control);
+                            if response.changed() && value.is_finite() {
+                                if let Some(slider) = slider {
+                                    doc.param_drag(slider.id, "value", ParamValue::Number(value));
+                                } else {
+                                    doc.end_gesture();
+                                    let control_id = new_node_id();
+                                    let bound = (value.abs() * 2.0).max(10.0);
+                                    let ops = vec![
+                                        GraphOp::AddNode {
+                                            id: control_id,
+                                            type_name: "number_slider".into(),
+                                            pos: (
+                                                node.pos.0 - 240.0,
+                                                node.pos.1 + port as f32 * 100.0,
+                                            ),
+                                        },
+                                        GraphOp::SetParam {
+                                            id: control_id,
+                                            key: "value".into(),
+                                            value: ParamValue::Number(value),
+                                        },
+                                        GraphOp::SetParam {
+                                            id: control_id,
+                                            key: "min".into(),
+                                            value: ParamValue::Number(-bound),
+                                        },
+                                        GraphOp::SetParam {
+                                            id: control_id,
+                                            key: "max".into(),
+                                            value: ParamValue::Number(bound),
+                                        },
+                                        GraphOp::SetParam {
+                                            id: control_id,
+                                            key: "label".into(),
+                                            value: ParamValue::Text(spec.name.into()),
+                                        },
+                                        GraphOp::Connect {
+                                            from: (control_id, 0),
+                                            to: (id, port as u16),
+                                        },
+                                    ];
+                                    if let Err(error) = doc.apply_ops(ops) {
+                                        errors.push(error);
+                                    }
+                                }
+                            }
+                            if response.drag_stopped() || response.lost_focus() {
+                                doc.end_param_drag();
+                            }
+                        }
+                        _ => {
+                            ui.weak(description);
+                        }
+                    }
+                    if let Some(edge) = edge {
+                        if ui.small_button("Select input node").clicked() {
+                            self.selection.clear();
+                            self.selection.insert(edge.from.0);
+                        }
+                    }
+                    ui.add_space(4.0);
+                });
+            }
+            ui.separator();
+            if let Some(error) = doc.last_eval.errors.get(&id) {
+                ui.colored_label(ERROR, error);
+            }
+            if let Some(outputs) = doc.last_eval.outputs.get(&id) {
+                let specs = component.outputs();
+                for (i, value) in outputs.iter().enumerate() {
+                    ui.label(
+                        egui::RichText::new(specs.get(i).map(|s| s.name).unwrap_or("output"))
+                            .strong(),
+                    );
+                    ui.monospace(value_summary(value));
+                    if let Value::List(values) = value {
+                        for (index, value) in values.iter().take(24).enumerate() {
+                            ui.monospace(format!("{index}: {}", value_summary(value)));
+                        }
+                        if values.len() > 24 {
+                            ui.weak(format!("… {} more values", values.len() - 24));
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Draw + interact. Any op errors are pushed into `errors` (toasted by
@@ -1006,7 +1247,7 @@ fn build_layouts(doc: &Document, xf: &ViewXf) -> Vec<Layout> {
     let mut out = Vec::with_capacity(graph.nodes.len());
     for (id, node) in &graph.nodes {
         let comp = doc.registry.get(&node.type_name);
-        let (label, category, in_specs, out_specs) = match comp {
+        let (mut label, category, in_specs, out_specs) = match comp {
             Some(c) => (
                 c.label().to_string(),
                 c.category().to_string(),
@@ -1020,6 +1261,14 @@ fn build_layouts(doc: &Document, xf: &ViewXf) -> Vec<Layout> {
                 Vec::new(),
             ),
         };
+        if let Some(custom) = node
+            .params
+            .get("label")
+            .and_then(ParamValue::as_text)
+            .filter(|s| !s.is_empty())
+        {
+            label = custom.chars().take(40).collect();
+        }
         let pnum = |key: &str, default: f64| {
             node.params
                 .get(key)
