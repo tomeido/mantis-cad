@@ -66,7 +66,7 @@ pub fn export(identity: &Identity, password: &str) -> Result<String, String> {
     .map_err(|error| format!("cannot serialize identity: {error}"))?;
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: &plaintext,
                 aad: associated_data(&public_key).as_bytes(),
@@ -117,7 +117,7 @@ pub fn import(json: &str, password: &str) -> Result<Identity, String> {
     let cipher = XChaCha20Poly1305::new((&key).into());
     let plaintext = cipher
         .decrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: &ciphertext,
                 aad: associated_data(&envelope.public_key).as_bytes(),
