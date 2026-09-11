@@ -951,11 +951,20 @@ fn now_ms() -> Result<u64, String> {
     u64::try_from(elapsed.as_millis()).map_err(|_| "timestamp does not fit in u64".to_string())
 }
 
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(HTTP_TIMEOUT))
+        // Keep error responses available so the server's explanation can be shown.
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
 fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
-    let response = ureq::get(url)
-        .timeout(HTTP_TIMEOUT)
+    let response = http_agent()
+        .get(url)
         .call()
-        .map_err(http_error)?;
+        .map_err(|error| format!("network error: {error}"))?;
     decode_json_response(response, url)
 }
 
@@ -968,20 +977,24 @@ fn post_json<T: Serialize, R: DeserializeOwned>(url: &str, value: &T) -> Result<
             body.len()
         ));
     }
-    let response = ureq::post(url)
-        .timeout(HTTP_TIMEOUT)
-        .set("Content-Type", "application/json")
-        .send_bytes(&body)
-        .map_err(http_error)?;
+    let response = http_agent()
+        .post(url)
+        .header("Content-Type", "application/json")
+        .send(body.as_slice())
+        .map_err(|error| format!("network error: {error}"))?;
     decode_json_response(response, url)
 }
 
 fn decode_json_response<T: DeserializeOwned>(
-    response: ureq::Response,
+    response: ureq::http::Response<ureq::Body>,
     url: &str,
 ) -> Result<T, String> {
+    if response.status().is_client_error() || response.status().is_server_error() {
+        return Err(http_error(response));
+    }
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(MAX_JSON_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -994,27 +1007,24 @@ fn decode_json_response<T: DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|error| format!("invalid JSON from {url}: {error}"))
 }
 
-fn http_error(error: ureq::Error) -> String {
-    match error {
-        ureq::Error::Status(status, response) => {
-            let mut bytes = Vec::new();
-            let _ = response
-                .into_reader()
-                .take(MAX_HTTP_ERROR_BYTES as u64 + 1)
-                .read_to_end(&mut bytes);
-            let truncated = bytes.len() > MAX_HTTP_ERROR_BYTES;
-            bytes.truncate(MAX_HTTP_ERROR_BYTES);
-            let mut body = String::from_utf8_lossy(&bytes).into_owned();
-            if truncated {
-                body.push('…');
-            }
-            if body.is_empty() {
-                format!("HTTP {status}")
-            } else {
-                format!("HTTP {status}: {body}")
-            }
-        }
-        ureq::Error::Transport(error) => format!("network error: {error}"),
+fn http_error(response: ureq::http::Response<ureq::Body>) -> String {
+    let status = response.status().as_u16();
+    let mut bytes = Vec::new();
+    let _ = response
+        .into_body()
+        .into_reader()
+        .take(MAX_HTTP_ERROR_BYTES as u64 + 1)
+        .read_to_end(&mut bytes);
+    let truncated = bytes.len() > MAX_HTTP_ERROR_BYTES;
+    bytes.truncate(MAX_HTTP_ERROR_BYTES);
+    let mut body = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        body.push('…');
+    }
+    if body.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        format!("HTTP {status}: {body}")
     }
 }
 
@@ -1151,6 +1161,97 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn http_fixture(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/test", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if let Some(length) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = length.trim().parse::<u64>().unwrap();
+                }
+                request.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader
+                .take(content_length)
+                .read_to_string(&mut request)
+                .unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+            request
+        });
+        (url, server)
+    }
+
+    #[test]
+    fn http_get_and_post_preserve_json_protocol() {
+        let (url, server) = http_fixture("200 OK", r#"{"ok":true}"#);
+        let result: serde_json::Value = get_json(&url).unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
+        assert!(server
+            .join()
+            .unwrap()
+            .starts_with("GET /api/test HTTP/1.1\r\n"));
+
+        let (url, server) = http_fixture("201 Created", r#"{"created":true}"#);
+        let result: serde_json::Value =
+            post_json(&url, &serde_json::json!({"title": "test"})).unwrap();
+        assert_eq!(result, serde_json::json!({"created": true}));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /api/test HTTP/1.1\r\n"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("content-type: application/json\r\n"));
+        assert!(request.ends_with(r#"{"title":"test"}"#));
+    }
+
+    #[test]
+    fn http_errors_preserve_status_and_limit_server_body() {
+        let (url, server) = http_fixture("403 Forbidden", "membership required");
+        assert_eq!(
+            get_json::<serde_json::Value>(&url).unwrap_err(),
+            "HTTP 403: membership required"
+        );
+        server.join().unwrap();
+
+        let (url, server) = http_fixture(
+            "500 Internal Server Error",
+            &"x".repeat(MAX_HTTP_ERROR_BYTES + 1),
+        );
+        let error = post_json::<_, serde_json::Value>(&url, &serde_json::json!({})).unwrap_err();
+        assert_eq!(
+            error,
+            format!("HTTP 500: {}…", "x".repeat(MAX_HTTP_ERROR_BYTES))
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http_invalid_json_response_is_rejected() {
+        let (url, server) = http_fixture("200 OK", "not JSON");
+        assert!(get_json::<serde_json::Value>(&url)
+            .unwrap_err()
+            .starts_with("invalid JSON from "));
+        server.join().unwrap();
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let sequence = TEST_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
