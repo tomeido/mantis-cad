@@ -35,7 +35,7 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "defa
 egui = "0.31"
 egui_glow = "0.31"
 glow = "0.16"
-ehttp = "0.5"
+ehttp = "0.7"
 tiny_http = "0.12"
 
 [profile.release]
