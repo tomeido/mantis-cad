@@ -19,7 +19,7 @@ glow = { workspace = true }
 ehttp = { workspace = true }
 getrandom = { workspace = true }
 argon2 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
