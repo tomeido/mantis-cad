@@ -9,22 +9,12 @@ updates:
       rust-dependencies:
         applies-to: version-updates
         patterns: ["*"]
-    # These API migrations need coordinated native/web changes. Cargo treats
-    # 0.x minor-line changes as major updates. Type-only ignores keep security
-    # updates eligible; do not replace them with ignored version ranges.
-    # See docs/DEPENDENCY_UPDATES.md for the deferred work and validation.
+    # Breaking API migrations need explicit native/web compatibility work.
+    # Cargo treats 0.x minor-line changes as major updates. Type-only ignores
+    # keep security updates eligible; do not use ignored version ranges.
+    # See docs/DEPENDENCY_UPDATES.md for examples and migration checks.
     ignore:
-      - dependency-name: eframe
-        update-types: ["version-update:semver-major"]
-      - dependency-name: egui
-        update-types: ["version-update:semver-major"]
-      - dependency-name: egui_glow
-        update-types: ["version-update:semver-major"]
-      - dependency-name: glow
-        update-types: ["version-update:semver-major"]
-      - dependency-name: argon2
-        update-types: ["version-update:semver-major"]
-      - dependency-name: quick-xml
+      - dependency-name: "*"
         update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /

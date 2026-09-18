@@ -21,15 +21,17 @@ existing compatibility checks. Closing them does not apply their changes.
 | `eframe`, `egui`, `egui_glow`, `glow` | [#23](https://github.com/tomeido/mantis-cad/pull/23), [#26](https://github.com/tomeido/mantis-cad/pull/26) | Upgrade the GUI stack together, migrate the `App` callbacks, and reconcile renderer types. |
 | `argon2` | [#25](https://github.com/tomeido/mantis-cad/pull/25) | Configure the new `getrandom` dependency for browsers and validate native/web identity-backup compatibility. |
 | `quick-xml` | [#27](https://github.com/tomeido/mantis-cad/pull/27) | Migrate the GHX parser to the new string and decoding APIs, then run the native Grasshopper fixture tests. |
+| `sha2`, `ed25519-dalek` | [#31](https://github.com/tomeido/mantis-cad/pull/31) | Coordinate the cryptographic trait and RNG changes, then validate signatures, signed-history replay and native/web builds. |
 
-For these dependencies, `.github/dependabot.yml` ignores only major **version
-updates** until the corresponding migration is complete. Cargo treats changes
-to the minor line of a `0.x` dependency as breaking major updates. Compatible
-patches remain eligible. The rules intentionally omit `versions` ranges:
+Routine Cargo PRs exclude major **version updates** so they do not mix API
+migrations with compatible updates. Cargo treats changes to the minor line of
+a `0.x` dependency as breaking major updates. Compatible patches and minor
+updates remain eligible. The rule intentionally omits `versions` ranges:
 Dependabot bypasses `ignore.update-types` for security updates.
 
-Remove the corresponding ignore rules when a migration is complete. Do not
-merge isolated GUI library updates that create incompatible renderer types.
+For an intentional major upgrade, update the manifests and code in a dedicated
+migration PR. Once merged, Dependabot follows the new compatible release line.
+Do not merge isolated GUI library updates that create incompatible renderer types.
 
 References: [GitHub configuration options](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference),
 [Cargo compatibility rules](https://github.com/dependabot/dependabot-core/blob/69605c903ab2db2b3f2ea302eda30dcec1d0ddc1/cargo/lib/dependabot/cargo/version.rb),
