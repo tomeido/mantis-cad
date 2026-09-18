@@ -117,10 +117,11 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 
 ### GitHub Release
 
-[Releases](https://github.com/tomeido/mantis-cad/releases)에서 Windows, Linux, macOS Intel,
-macOS Apple Silicon용 preview 앱과 `SHA256SUMS`를 받을 수 있습니다. 첫 버전 태그가 발행되기
-전에는 다운로드 항목이 없을 수 있습니다. 현재 preview 앱은 코드서명되지 않았으므로 체크섬을
-검증해야 합니다.
+현재 [v0.2.0 릴리스](https://github.com/tomeido/mantis-cad/releases/tag/v0.2.0)에서
+Windows·Linux용 preview 앱, 호환팩과 `SHA256SUMS`를 받을 수 있습니다.
+macOS 설치 파일은 아직 공개되지 않았으며, 직접 빌드하는 방법은
+[설치 가이드](docs/INSTALL.md)에 안내되어 있습니다. 현재 preview 앱은 코드서명되지
+않았으므로 체크섬을 검증해야 합니다.
 
 ### Docker로 로컬 웹 실행
 
