@@ -27,8 +27,18 @@ const AXIS_Z: [f32; 4] = [0.271, 0.463, 0.910, 1.0];
 const FOVY: f64 = 45.0 * std::f64::consts::PI / 180.0;
 const ZNEAR: f64 = 0.05;
 const ZFAR: f64 = 500.0;
-/// Segments used to tessellate preview curves.
+/// Segments used to tessellate nonlinear preview curves.
 const CURVE_SEGS: usize = 96;
+
+/// Surface inspection is a display setting; it never changes the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SurfaceDisplay {
+    #[default]
+    Shaded,
+    Zebra,
+}
+
+const ZEBRA_HELP: &str = "Inspect reflected stripes on the preview mesh. Orbit to inspect different directions; adjust density for broad or local changes. Tessellation and vertex normals affect the result. This preview does not certify analytic G1/G2 or Class-A surface continuity.";
 
 // ---------------------------------------------------------------------------
 // camera math (pure — unit tested)
@@ -289,8 +299,28 @@ impl CpuBatch {
     }
     fn append_mesh(&mut self, m: &Mesh) {
         let base = self.vertex_count() as u32;
+        // Imported meshes can lack usable normals. Repair only those meshes:
+        // recomputing every mesh would discard intentional creases / normals.
+        let repaired;
+        let normals = if m.normals.len() != m.positions.len()
+            || m.normals
+                .iter()
+                .any(|n| !n.is_finite() || n.length_sq() < 1e-18)
+        {
+            let mut mesh = m.clone();
+            mesh.recompute_normals();
+            repaired = mesh.normals;
+            &repaired
+        } else {
+            &m.normals
+        };
         for (i, p) in m.positions.iter().enumerate() {
-            let n = m.normals.get(i).copied().unwrap_or(Vec3::Z);
+            let n = normals[i].normalized();
+            let n = if n.is_finite() && n != Vec3::ZERO {
+                n
+            } else {
+                Vec3::Z
+            };
             self.push_vertex(*p, n);
         }
         let vcount = m.positions.len() as u32;
@@ -367,7 +397,12 @@ pub fn build_batches(
                 if sel { &mut mesh_s } else { &mut mesh_n }.append_mesh(m);
             }
             SceneGeom::Curve(c) => {
-                let pts = c.tessellate(CURVE_SEGS);
+                // A line is already exact with two endpoints. This also keeps
+                // curvature comb teeth from producing redundant subdivisions.
+                let pts = match c.as_ref() {
+                    Curve::Line { a, b } => vec![*a, *b],
+                    _ => c.tessellate(CURVE_SEGS),
+                };
                 stats.vertices += pts.len();
                 stats.bbox = stats.bbox.union(BBox::from_points(&pts));
                 let closed = c.is_closed();
@@ -451,6 +486,9 @@ struct Renderer {
     u_color: Option<glow::UniformLocation>,
     u_light_dir: Option<glow::UniformLocation>,
     u_shaded: Option<glow::UniformLocation>,
+    u_zebra: Option<glow::UniformLocation>,
+    u_camera_eye: Option<glow::UniformLocation>,
+    u_stripe_density: Option<glow::UniformLocation>,
     u_point_size: Option<glow::UniformLocation>,
     static_batches: Vec<GpuBatch>,
     scene_batches: Vec<GpuBatch>,
@@ -462,8 +500,10 @@ layout(location = 1) in vec3 a_normal;
 uniform mat4 u_mvp;
 uniform float u_point_size;
 out vec3 v_normal;
+out vec3 v_position;
 void main() {
     v_normal = a_normal;
+    v_position = a_pos;
     gl_Position = u_mvp * vec4(a_pos, 1.0);
     gl_PointSize = u_point_size;
 }
@@ -471,16 +511,37 @@ void main() {
 
 const FRAG_SRC: &str = r#"
 in vec3 v_normal;
+in vec3 v_position;
 uniform vec4 u_color;
 uniform vec3 u_light_dir;
 uniform int u_shaded;
+uniform int u_zebra;
+uniform vec3 u_camera_eye;
+uniform float u_stripe_density;
 out vec4 frag_color;
 void main() {
     if (u_shaded == 1) {
-        vec3 n = normalize(v_normal);
-        float ndl = abs(dot(n, normalize(u_light_dir)));
-        float shade = 0.28 + 0.72 * ndl;
-        frag_color = vec4(u_color.rgb * shade, u_color.a);
+        // Smooth interpolated normals; a deterministic fallback also avoids
+        // normalize(0) where opposing vertex normals cancel inside a face.
+        vec3 n = dot(v_normal, v_normal) > 0.000001
+            ? normalize(v_normal) : vec3(0.0, 0.0, 1.0);
+        if (u_zebra == 1) {
+            vec3 incident = normalize(v_position - u_camera_eye);
+            vec3 reflection = reflect(incident, n);
+            // A fixed world-space striped environment: highlights move with
+            // the eye and reveal changes in surface normals, not screen UVs.
+            float phase = dot(reflection, normalize(vec3(1.0, 0.35, 0.2)))
+                * u_stripe_density * 3.14159265;
+            float wave = sin(phase);
+            float edge = max(fwidth(phase), 0.015);
+            float stripe = smoothstep(-edge, edge, wave);
+            vec3 light = mix(vec3(0.96), u_color.rgb, 0.25);
+            frag_color = vec4(mix(vec3(0.025), light, stripe), u_color.a);
+        } else {
+            float ndl = abs(dot(n, normalize(u_light_dir)));
+            float shade = 0.28 + 0.72 * ndl;
+            frag_color = vec4(u_color.rgb * shade, u_color.a);
+        }
     } else {
         frag_color = u_color;
     }
@@ -538,6 +599,9 @@ impl Renderer {
                 u_color: gl.get_uniform_location(program, "u_color"),
                 u_light_dir: gl.get_uniform_location(program, "u_light_dir"),
                 u_shaded: gl.get_uniform_location(program, "u_shaded"),
+                u_zebra: gl.get_uniform_location(program, "u_zebra"),
+                u_camera_eye: gl.get_uniform_location(program, "u_camera_eye"),
+                u_stripe_density: gl.get_uniform_location(program, "u_stripe_density"),
                 u_point_size: gl.get_uniform_location(program, "u_point_size"),
                 program,
                 static_batches: Vec::new(),
@@ -556,7 +620,14 @@ impl Renderer {
         }
     }
 
-    fn paint(&self, gl: &glow::Context, mvp: &[f32; 16]) {
+    fn paint(
+        &self,
+        gl: &glow::Context,
+        mvp: &[f32; 16],
+        camera_eye: Vec3,
+        surface_display: SurfaceDisplay,
+        stripe_density: f32,
+    ) {
         use glow::HasContext as _;
         unsafe {
             gl.clear_color(BG[0], BG[1], BG[2], BG[3]);
@@ -569,6 +640,17 @@ impl Renderer {
             gl.use_program(Some(self.program));
             gl.uniform_matrix_4_f32_slice(self.u_mvp.as_ref(), false, mvp);
             gl.uniform_3_f32(self.u_light_dir.as_ref(), 0.35, 0.25, 0.9);
+            gl.uniform_1_i32(
+                self.u_zebra.as_ref(),
+                i32::from(surface_display == SurfaceDisplay::Zebra),
+            );
+            gl.uniform_3_f32(
+                self.u_camera_eye.as_ref(),
+                camera_eye.x as f32,
+                camera_eye.y as f32,
+                camera_eye.z as f32,
+            );
+            gl.uniform_1_f32(self.u_stripe_density.as_ref(), stripe_density);
             for b in self.static_batches.iter().chain(self.scene_batches.iter()) {
                 gl.uniform_4_f32(
                     self.u_color.as_ref(),
@@ -695,6 +777,8 @@ pub struct ViewportPanel {
     pub camera: Camera,
     pub shared: Arc<Mutex<ViewportShared>>,
     pub stats: SceneStats,
+    surface_display: SurfaceDisplay,
+    stripe_density: f32,
 }
 
 impl ViewportPanel {
@@ -703,6 +787,8 @@ impl ViewportPanel {
             camera: Camera::default(),
             shared: ViewportShared::new(),
             stats: SceneStats::default(),
+            surface_display: SurfaceDisplay::default(),
+            stripe_density: 14.0,
         }
     }
 
@@ -719,6 +805,15 @@ impl ViewportPanel {
 
     /// Draw the viewport into the given ui (fills the available rect).
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.surface_display, SurfaceDisplay::Shaded, "Shaded");
+            ui.selectable_value(&mut self.surface_display, SurfaceDisplay::Zebra, "Zebra")
+                .on_hover_text(ZEBRA_HELP);
+            if self.surface_display == SurfaceDisplay::Zebra {
+                ui.add(egui::Slider::new(&mut self.stripe_density, 4.0..=40.0).text("Density"));
+                ui.weak("Mesh preview").on_hover_text(ZEBRA_HELP);
+            }
+        });
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
@@ -750,6 +845,9 @@ impl ViewportPanel {
         // --- paint callback ----------------------------------------------
         let aspect = (rect.width() / rect.height().max(1.0)) as f64;
         let mvp = mat4_to_f32(&self.camera.view_proj(aspect));
+        let camera_eye = self.camera.eye();
+        let surface_display = self.surface_display;
+        let stripe_density = self.stripe_density;
         let shared = self.shared.clone();
         let callback = egui::PaintCallback {
             rect,
@@ -771,7 +869,7 @@ impl ViewportPanel {
                     gl.enable(glow::SCISSOR_TEST);
                     gl.scissor(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
                 }
-                r.paint(gl, &mvp);
+                r.paint(gl, &mvp, camera_eye, surface_display, stripe_density);
             })),
         };
         ui.painter().add(callback);
@@ -1039,6 +1137,74 @@ mod tests {
     }
 
     #[test]
+    fn mesh_batches_repair_missing_and_invalid_normals_for_reflections() {
+        for normals in [
+            vec![],
+            vec![Vec3::ZERO; 3],
+            vec![Vec3::Z],
+            vec![Vec3::new(f64::NAN, 0.0, 0.0); 3],
+        ] {
+            let mesh = Mesh {
+                positions: vec![Vec3::ZERO, Vec3::Y * 2.0, Vec3::Z * 3.0],
+                normals,
+                indices: vec![[0, 1, 2], [0, 1, 99]],
+            };
+            let original_normal_count = mesh.normals.len();
+            let mut batch = CpuBatch::new(BatchMode::Triangles, MESH_COLOR, true);
+            batch.append_mesh(&mesh);
+            assert_eq!(batch.indices, [0, 1, 2]);
+            for vertex in batch.vertices.chunks_exact(6) {
+                // The YZ face reflects with +X; a default +Z normal would
+                // disguise the actual surface orientation in zebra mode.
+                assert_eq!(&vertex[3..], &[1.0, 0.0, 0.0]);
+            }
+            assert_eq!(mesh.normals.len(), original_normal_count);
+        }
+    }
+
+    #[test]
+    fn mesh_batches_preserve_supplied_normal_directions() {
+        let mesh = Mesh {
+            positions: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+            normals: vec![Vec3::X * 2.0, Vec3::Y * 3.0, Vec3::Z * 4.0],
+            indices: vec![[0, 1, 2]],
+        };
+        let mut batch = CpuBatch::new(BatchMode::Triangles, MESH_COLOR, true);
+        batch.append_mesh(&mesh);
+        let normals: Vec<_> = batch
+            .vertices
+            .chunks_exact(6)
+            .map(|v| [v[3], v[4], v[5]])
+            .collect();
+        assert_eq!(normals, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    }
+
+    #[test]
+    fn line_curve_batches_use_only_exact_endpoints() {
+        let items: Vec<_> = (0..32)
+            .map(|i| SceneItem {
+                node: nid(1),
+                geom: SceneGeom::Curve(Arc::new(Curve::Line {
+                    a: Vec3::new(i as f64, 0.0, 0.0),
+                    b: Vec3::new(i as f64, 1.0, 2.0),
+                })),
+            })
+            .collect();
+        let (batches, stats) = build_batches(&items, &BTreeSet::new());
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.mode, BatchMode::Lines);
+        assert_eq!(batch.vertex_count(), 64);
+        assert_eq!(stats.vertices, 64);
+        assert_eq!(stats.bbox.min, Vec3::ZERO);
+        assert_eq!(stats.bbox.max, Vec3::new(31.0, 1.0, 2.0));
+        for (i, segment) in batch.vertices.chunks_exact(12).enumerate() {
+            assert_eq!(&segment[..3], &[i as f32, 0.0, 0.0]);
+            assert_eq!(&segment[6..9], &[i as f32, 1.0, 2.0]);
+        }
+    }
+
+    #[test]
     fn curve_batches_wrap_closed_curves() {
         let circle = Arc::new(Curve::Circle {
             plane: mantis_kernel::Plane::world_xy(),
@@ -1052,6 +1218,7 @@ mod tests {
         assert_eq!(batches.len(), 1);
         let b = &batches[0];
         assert_eq!(b.mode, BatchMode::Lines);
+        assert!(!b.shaded, "curve overlays must bypass zebra shading");
         // closed curve with N sample points -> N segments -> 2N vertices
         assert_eq!(b.vertex_count(), CURVE_SEGS * 2);
     }
@@ -1060,6 +1227,7 @@ mod tests {
     fn static_batches_have_grid_and_axes() {
         let batches = build_static_batches();
         assert_eq!(batches.len(), 4);
+        assert!(batches.iter().all(|b| !b.shaded));
         // grid: 21 lines each direction, 2 verts per line
         assert_eq!(batches[0].vertex_count(), 21 * 2 * 2);
         for b in &batches[1..] {

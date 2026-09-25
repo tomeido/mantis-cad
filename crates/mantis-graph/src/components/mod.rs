@@ -21,6 +21,10 @@
 //!            divide_curve(curve,n -> points) · eval_curve(curve,t -> point,
 //!            tangent) · curve_length · rectangle(plane,x,y) ·
 //!            end_points(curve -> start,end) · reverse_curve
+//!            curve_comb(curve,samples,scale -> comb,curvature,valid) ·
+//!            curve_continuity(a,b,gap_tol,angle_tol,
+//!            curvature_tol -> gap,angle,curvature_delta,g0,g1,g2) ·
+//!            blend_curve(a,b,tension -> curve)
 //! Surface:   extrude(curve,dir) · revolve(curve,axis origin+dir,angle) ·
 //!            loft(curves) · pipe(curve,radius) · planar_srf(curve) ·
 //!            box_mesh(plane,x,y,z) · sphere(center,radius) ·
@@ -41,6 +45,7 @@
 //! on flat lists; no Grasshopper data-tree paths or .gh serialization implied.
 
 mod analysis;
+mod curve_quality;
 mod curves;
 mod imported;
 mod maths;
@@ -104,6 +109,7 @@ pub fn all() -> Vec<Arc<dyn Component>> {
     v.extend(sets::all());
     v.extend(vectors::all());
     v.extend(curves::all());
+    v.extend(curve_quality::all());
     v.extend(surface::all());
     v.extend(solid::all());
     v.extend(transform::all());

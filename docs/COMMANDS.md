@@ -41,6 +41,9 @@ Rhino 설치나 라이선스가 필요하지 않습니다.
 | 직선 배열 | `ArrayLinear 5 10 0 0` | 원본 포함 개수, 간격 벡터 |
 | 원형 배열 | `ArrayPolar 6 360` | 원본 포함 개수, 원점·Z축 기준 전체 각도 |
 | 분할·평가 | `Divide 10`, `EvaluateCurve 0.5` | 선택 곡선의 분할 개수 또는 0~1 매개변수 |
+| 곡률 빗살 | `CurvatureComb 32 1` | 곡선, 샘플 수·표시 배율 |
+| 연결 검사 | `CurveContinuity 0.001 0.5 0.001` | 곡선 두 개, 간격·각도(도)·곡률 공차 |
+| 접선 블렌드 | `BlendCurve 1` | 곡선 두 개, 접선 핸들 배율 |
 | 끝점·방향 | `EndPoints`, `Reverse` | 선택한 곡선 |
 | 측정 | `Length`, `Area`, `Volume`, `BoundingBox` | 길이는 곡선, 면적·체적은 메시 |
 | 수열·범위·난수 | `Series 0 1 10`, `Range 0 1 10`, `Random 0 10 10 1` | 시작·간격/끝·개수/분할수, 난수는 마지막 인자가 seed |
@@ -66,14 +69,20 @@ Loft의 단면 순서는 노드 위치의 위→아래, 같은 높이에서는 �
 기본 앱의 `MeshBooleanUnion`, `MeshBooleanDifference`, `MeshBooleanIntersection`,
 `MeshTrimPlane`, `MeshSplitPlane` 명령은 [입력 예제](INTEROP.md#기본-앱의-메시-연산)를 참고하세요.
 
+CATIA식 모델 탐색·주요 치수 편집과 Alias식 제브라·곡선 품질 도구의 사용법은
+[설계·형상 품질 도구](DESIGN_QUALITY.md)에 정리했습니다.
+
 ## Grasshopper식 노드
 
-**40종의 명령과 83종의 컴포넌트**를 제공합니다.
+**43종의 명령과 86종의 컴포넌트**를 제공합니다.
 0.2.0에는 메시 Boolean 3종, 평면 Trim/Split, CAD Geometry, Stored List를 추가했습니다.
 캔버스 추가 메뉴에서 이름 또는 카테고리로 검색하고 출력 포트를 입력 포트에 연결합니다.
 
 | 새 컴포넌트 ID | 기능 |
 |---|---|
+| `curve_comb` | 곡률 빗살·곡률 값·샘플 유효성 출력 |
+| `curve_continuity` | 끝→시작의 거리·접선·곡률 차이와 G0/G1/G2 공차 판정 |
+| `blend_curve` | 두 곡선의 끝→시작을 잇는 3차 접선 블렌드 |
 | `rectangle` | 평면·너비·높이로 닫힌 사각형 곡선 생성 |
 | `end_points` | 곡선의 시작점·끝점 출력 |
 | `reverse_curve` | 곡선 종류를 유지하면서 방향 반전 |

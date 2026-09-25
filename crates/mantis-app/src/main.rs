@@ -6,6 +6,7 @@ mod app;
 mod cad_io;
 mod chain_panel;
 mod commands;
+mod design_panel;
 #[cfg(not(target_arch = "wasm32"))]
 mod grasshopper;
 mod key_backup;
@@ -22,7 +23,13 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title("MantisCAD"),
+            .with_title("MantisCAD")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../../../packaging/mantis-cad.png"
+                ))
+                .expect("the bundled MantisCAD icon is a valid PNG"),
+            ),
         // Avoid a 4x multisampled framebuffer: it increases GPU memory and
         // prevents startup on some software/remote OpenGL implementations.
         multisampling: 0,

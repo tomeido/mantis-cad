@@ -95,6 +95,9 @@ const FROZEN_TYPE_NAMES: &[&str] = &[
     "rectangle",
     "end_points",
     "reverse_curve",
+    "curve_comb",
+    "curve_continuity",
+    "blend_curve",
     // Surface
     "extrude",
     "revolve",
@@ -139,7 +142,7 @@ fn registry_contains_all_frozen_type_names() {
         // Port specs must be constructible without panicking.
         let _ = (c.inputs(), c.outputs());
     }
-    assert_eq!(FROZEN_TYPE_NAMES.len(), 83);
+    assert_eq!(FROZEN_TYPE_NAMES.len(), 86);
     assert_eq!(reg.iter().count(), FROZEN_TYPE_NAMES.len());
 }
 

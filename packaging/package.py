@@ -208,7 +208,8 @@ def package_windows(package, output, binary, version, epoch, args):
         raise RuntimeError("NSIS is required; install it and pass --makensis if it is not on PATH")
     flag = "/" if os.name == "nt" else "-"
     run(makensis, f"{flag}V2", f"{flag}DVERSION={version}", f"{flag}DPACKAGE_DIR={package}",
-        f"{flag}DOUTPUT={installer}", ROOT / "packaging/windows/installer.nsi")
+        f"{flag}DOUTPUT={installer}", f"{flag}DMANTIS_ICON={ROOT / 'packaging/mantis-cad.ico'}",
+        ROOT / "packaging/windows/installer.nsi")
     return [zipfile_path, installer]
 
 

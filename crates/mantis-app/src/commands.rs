@@ -197,6 +197,24 @@ const COMMANDS: &[CommandSpec] = &[
         help: "selected curve(s): start and end points",
     },
     CommandSpec {
+        name: "CurvatureComb",
+        component: "curve_comb",
+        example: "CurvatureComb 32 1",
+        help: "selected curve(s): optional sample count (2..2048) and comb scale; inspect curvature and valid outputs",
+    },
+    CommandSpec {
+        name: "CurveContinuity",
+        component: "curve_continuity",
+        example: "CurveContinuity 0.001 0.5 0.001",
+        help: "two curves, first end to second start: optional gap, angle (degrees), curvature tolerances; ordered top to bottom, then left to right",
+    },
+    CommandSpec {
+        name: "BlendCurve",
+        component: "blend_curve",
+        example: "BlendCurve 1",
+        help: "two curves, first end to second start: optional tangent tension (0..10, excluding 0); ordered top to bottom, then left to right",
+    },
+    CommandSpec {
         name: "Reverse",
         component: "reverse_curve",
         example: "Reverse",
@@ -578,7 +596,9 @@ pub fn execute(
         }
         "Rectangle" | "Cylinder" | "Cone" | "Torus" => arity(&[2])?,
         "ExtrudeCrv" => arity(&[1, 3])?,
-        "Revolve" => arity(&[0, 1])?,
+        "Revolve" | "BlendCurve" => arity(&[0, 1])?,
+        "CurvatureComb" => arity(&[0, 1, 2])?,
+        "CurveContinuity" => arity(&[0, 3])?,
         "ArrayLinear" | "Random" => arity(&[4])?,
         "ArrayPolar" => arity(&[1, 2])?,
         "Polyline" | "Curve" if nums.len() >= 6 && nums.len() % 3 == 0 && nums.len() <= 300 => {}
@@ -606,6 +626,27 @@ pub fn execute(
     }
     if spec.name == "EvaluateCurve" && !(0.0..=1.0).contains(&nums[0]) {
         return Err("Curve parameter must be from 0 to 1.".into());
+    }
+    if spec.name == "CurvatureComb" {
+        if nums
+            .first()
+            .is_some_and(|n| !(2.0..=2048.0).contains(n) || n.fract() != 0.0)
+        {
+            return Err("Comb samples must be a whole number from 2 to 2048.".into());
+        }
+        if nums.get(1).is_some_and(|n| *n < 0.0) {
+            return Err("Comb scale must be nonnegative.".into());
+        }
+    }
+    if spec.name == "CurveContinuity"
+        && (nums.iter().any(|n| *n < 0.0) || nums.get(1).is_some_and(|n| *n > 180.0))
+    {
+        return Err(
+            "Continuity tolerances must be nonnegative; angle must be at most 180 degrees.".into(),
+        );
+    }
+    if spec.name == "BlendCurve" && nums.first().is_some_and(|n| *n <= 0.0 || *n > 10.0) {
+        return Err("Blend tension must be greater than 0 and at most 10.".into());
     }
     if [
         "Rectangle",
@@ -677,8 +718,12 @@ pub fn execute(
         });
     }
     let mut recipe = Recipe::default();
-    let binary = spec.name.starts_with("MeshBoolean");
+    let curve_pair = matches!(spec.name, "CurveContinuity" | "BlendCurve");
+    let binary = spec.name.starts_with("MeshBoolean") || curve_pair;
     if binary && selected.len() != 2 {
+        if curve_pair {
+            return Err("Select exactly two curve nodes; first end connects to second start (node order: top to bottom, then left to right).".into());
+        }
         return Err("Select exactly two closed mesh nodes for a mesh Boolean operation.".into());
     }
     if matches!(spec.name, "MeshTrimPlane" | "MeshSplitPlane") {
@@ -811,6 +856,26 @@ pub fn execute(
             }
             "Divide" => recipe.number(id, 1, nums[0], "segments"),
             "EvaluateCurve" => recipe.number(id, 1, nums[0], "parameter"),
+            "CurvatureComb" => {
+                if let Some(n) = nums.first() {
+                    recipe.number(id, 1, *n, "samples");
+                }
+                if let Some(n) = nums.get(1) {
+                    recipe.number(id, 2, *n, "comb scale");
+                }
+            }
+            "CurveContinuity" => {
+                if !nums.is_empty() {
+                    recipe.number(id, 2, nums[0], "gap tolerance");
+                    recipe.number(id, 3, nums[1].to_radians(), "angle tolerance radians");
+                    recipe.number(id, 4, nums[2], "curvature tolerance");
+                }
+            }
+            "BlendCurve" => {
+                if let Some(n) = nums.first() {
+                    recipe.number(id, 2, *n, "tangent tension");
+                }
+            }
             _ => {}
         }
     }
@@ -976,6 +1041,11 @@ mod tests {
         for spec in COMMANDS {
             let mut d = doc();
             let selection = match spec.name {
+                "BlendCurve" | "CurveContinuity" => {
+                    let a = run(&mut d, &BTreeSet::new(), "Line 0 0 0 2 0 0");
+                    let b = run(&mut d, &BTreeSet::new(), "Line 4 1 0 6 1 0");
+                    a.union(&b).copied().collect()
+                }
                 "MeshBooleanUnion" | "MeshBooleanDifference" | "MeshBooleanIntersection" => {
                     let a = run(&mut d, &BTreeSet::new(), "Box 2 2 2");
                     let b = run(&mut d, &BTreeSet::new(), "Box 1 1 1");
@@ -1011,6 +1081,88 @@ mod tests {
         assert!(execute(&mut d, &BTreeSet::new(), "Sphere 3").is_err());
         assert_eq!(d.graph, graph);
         assert!(d.pending.is_empty());
+    }
+
+    #[test]
+    fn curve_quality_commands_keep_sources_and_replay_with_undo() {
+        let mut d = doc();
+        let circle = run(&mut d, &BTreeSet::new(), "Circle 5");
+        let before = d.graph.clone();
+        let comb = run(&mut d, &circle, "CurvatureComb 16 2");
+        d.evaluate();
+        let outputs = &d.last_eval.outputs[comb.first().unwrap()];
+        let Value::List(teeth) = &outputs[0] else {
+            panic!("comb curves")
+        };
+        assert_eq!(teeth.len(), 16);
+        let Value::List(curvatures) = &outputs[1] else {
+            panic!("curvature samples")
+        };
+        assert!(curvatures
+            .iter()
+            .all(|v| (v.as_number().unwrap() - 0.2).abs() < 1e-9));
+        assert!(d.graph.nodes[circle.first().unwrap()].preview());
+        d.undo_pending().unwrap();
+        assert_eq!(d.graph, before);
+        d.redo_pending().unwrap();
+
+        let a = run(&mut d, &BTreeSet::new(), "Line 0 0 0 2 0 0");
+        let b = run(&mut d, &BTreeSet::new(), "Line 4 1 0 6 1 0");
+        let pair = a.union(&b).copied().collect();
+        let blend_ids = run(&mut d, &pair, "BlendCurve 1");
+        let blend = first(&mut d, &blend_ids).as_curve().unwrap();
+        assert!(blend.point_at(0.0).distance(Vec3::new(2.0, 0.0, 0.0)) < 1e-9);
+        assert!(blend.point_at(1.0).distance(Vec3::new(4.0, 1.0, 0.0)) < 1e-9);
+        assert!(blend.tangent_at(0.0).distance(Vec3::X) < 1e-3);
+        assert!(blend.tangent_at(1.0).distance(Vec3::X) < 1e-3);
+        assert!(d.graph.nodes[a.first().unwrap()].preview());
+        assert!(d.graph.nodes[b.first().unwrap()].preview());
+
+        let report = run(&mut d, &pair, "CurveContinuity 0.001 0.5 0.001");
+        d.evaluate();
+        let values = &d.last_eval.outputs[report.first().unwrap()];
+        assert!((values[0].as_number().unwrap() - 5.0_f64.sqrt()).abs() < 1e-9);
+        assert_eq!(values[3].as_bool(), Some(false));
+        assert_eq!(values[4].as_bool(), Some(false));
+        assert_eq!(values[5].as_bool(), Some(false));
+        let graph = d.graph.clone();
+        let expected = d.last_eval.outputs.clone();
+        d.commit("curve quality and blend", 1).unwrap();
+        d.chain.validate().unwrap();
+        let replay = d.chain.replay(None).unwrap();
+        assert_eq!(replay, graph);
+        let result = Evaluator::new().evaluate(&replay, &d.registry);
+        assert!(result.errors.is_empty());
+        assert_eq!(result.outputs, expected);
+    }
+
+    #[test]
+    fn curve_quality_rejects_bad_parameters_and_selection_atomically() {
+        let mut d = doc();
+        let circle = run(&mut d, &BTreeSet::new(), "Circle 5");
+        let before = d.graph.clone();
+        let pending = d.pending.clone();
+        for input in [
+            "CurvatureComb 1",
+            "CurvatureComb 2049",
+            "CurvatureComb 3.5",
+            "CurvatureComb 32 -1",
+            "CurveContinuity",
+            "CurveContinuity 0.1",
+            "CurveContinuity -1 1 1",
+            "CurveContinuity 1 181 1",
+            "BlendCurve",
+            "BlendCurve 0",
+            "BlendCurve 11",
+        ] {
+            assert!(execute(&mut d, &circle, input).is_err(), "{input}");
+            assert_eq!(d.graph, before);
+            assert_eq!(d.pending, pending);
+        }
+        let box_ids = run(&mut d, &BTreeSet::new(), "Box 1 2 3");
+        let before = d.graph.clone();
+        assert!(execute(&mut d, &box_ids, "CurvatureComb").is_err());
+        assert_eq!(d.graph, before);
     }
 
     #[test]

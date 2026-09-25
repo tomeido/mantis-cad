@@ -21,7 +21,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 │  mantis-protocol 프로젝트·ACL·동기화의 버전 고정 공용 계약            │
 │  mantis-chain   GraphOp만 담는 sha256+ed25519 블록체인          │
 │  mantis-history 서명 리비전의 정의·preview 형상 비교             │
-│  mantis-graph   Grasshopper식 데이터플로 엔진, 83개 컴포넌트      │
+│  mantis-graph   Grasshopper식 데이터플로 엔진, 86개 컴포넌트      │
 │  mantis-kernel  기하 커널: NURBS·메시·extrude/revolve/loft/pipe │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -48,7 +48,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
   extrude(귀자르기 캡)/revolve/loft/pipe(평행이동 프레임)/planar surface,
   닫힌 메시 Boolean·평면 Trim/Split, OBJ 내보내기.
 - **mantis-graph** — `Component` 트레이트 + 레지스트리, 결정론적 위상정렬 평가기
-  (더티 추적 캐시), Grasshopper의 longest-list 매칭, 83개 빌트인 컴포넌트
+  (더티 추적 캐시), Grasshopper의 longest-list 매칭, 86개 빌트인 컴포넌트
   (Params/Maths/Sets/Vector/Curve/Surface/Transform/Analysis).
 - **mantis-chain** — `Block { index, prev_hash, timestamp, author, author_pk, message, ops, hash, sig }`.
   `hash = sha256(정규 JSON)`, `sig = ed25519(해시 원바이트)`. 검증은 해시 링크·서명·
@@ -88,6 +88,23 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 
 ## 사용 방법
 
+### 비주얼 스크립트에서 여러 노드 선택하기
+
+빈 공간을 **마우스 왼쪽 버튼으로 드래그**하면 선택 사각형에 걸친 노드를 함께 선택합니다.
+**Shift+드래그**는 기존 선택에 추가하고, **Shift+클릭**은 개별 노드의 선택을 켜고 끕니다.
+선택한 노드 하나를 드래그하면 함께 이동하며, **Delete**로 함께 삭제할 수 있습니다.
+화면 이동은 **마우스 가운데 버튼 드래그** 또는 빈 공간에서 **Space+왼쪽 드래그**, 확대·축소는
+휠 스크롤입니다. 박스 선택 중 **Esc**를 누르면 이전 선택으로 돌아갑니다.
+웹버전과 윈도우 설치판에서 같은 방식으로 동작합니다.
+
+### 설계 구조와 곡선 품질 확인하기
+
+**Design → Model**에서 모델의 연결 관계와 주요 치수를 한곳에서 확인하고 수정합니다.
+3D 뷰포트의 **Zebra**로 표면 미리보기를 검사하고, 명령창에서 `CurvatureComb 32 1`,
+`CurveContinuity 0.001 0.5 0.001`, `BlendCurve 1`로 곡률 빗살·끝점 연속성·접선 블렌드를
+사용합니다. 기존 Undo/Redo와 서명 이력에 연결되며 별도 CAD 설치가 필요하지 않습니다.
+정확한 지원 범위와 예제는 [설계·형상 품질 도구](docs/DESIGN_QUALITY.md)를 참고하세요.
+
 ### 파일 호환과 B-rep 연산
 
 **CAD…**에서 `.3dm`·`.ghx`·`.gh`·STEP을 가져오고 저장합니다.
@@ -102,7 +119,7 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 `ArrayLinear 5 10 0 0`을 이어서 실행하면 편집 가능한 슬라이더와 연결이 자동으로
 만들어집니다. 명령 하나는 실행 취소 한 단계로 처리됩니다.
 
-40종의 명령과 83종의 컴포넌트를 제공하며, 입력값·출력값 검사창으로 노드를 수정할 수
+43종의 명령과 86종의 컴포넌트를 제공하며, 입력값·출력값 검사창으로 노드를 수정할 수
 있습니다. [명령 및 기능 가이드](docs/COMMANDS.md)에 예제와 지원 범위를 정리했습니다.
 직선·원형 배열, 리스트 정렬·이동·분기·병합, seed 난수가 추가되었고,
 화면 이동 중 재평가와 실행 취소 기록의 중복 복사를 줄였습니다.
@@ -314,7 +331,7 @@ IS a Grasshopper-style node graph; every edit is a `GraphOp` sealed into
 sha256-linked, ed25519-signed blocks — **never geometry**. Peers replay the
 op-log deterministically to rebuild identical models, so a multi-megabyte
 model syncs as kilobytes. Workspace: `mantis-kernel` (geometry),
-`mantis-graph` (dataflow engine, 83 components), `mantis-chain` (op-log
+`mantis-graph` (dataflow engine, 86 components), `mantis-chain` (op-log
 blockchain), `mantis-history` (definition and derived-preview revision diff),
 `mantis-protocol` (versioned project/access/sync contracts),
 `mantis-app` (egui GUI, native+wasm), `mantis-server` (public-read,

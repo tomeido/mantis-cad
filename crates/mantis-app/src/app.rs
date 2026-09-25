@@ -2,6 +2,7 @@
 
 use crate::chain_panel;
 use crate::commands::CommandPalette;
+use crate::design_panel::DesignPanel;
 use crate::key_backup;
 use crate::node_editor::NodeEditor;
 use crate::state::Document;
@@ -82,6 +83,8 @@ pub struct MantisApp {
     doc: Document,
     editor: NodeEditor,
     commands: CommandPalette,
+    design_panel: DesignPanel,
+    show_model: bool,
     #[cfg(not(target_arch = "wasm32"))]
     cad_io: crate::cad_io::CadIo,
     show_inspector: bool,
@@ -183,6 +186,8 @@ impl MantisApp {
             doc,
             editor: NodeEditor::new(),
             commands: CommandPalette::default(),
+            design_panel: DesignPanel::default(),
+            show_model: true,
             #[cfg(not(target_arch = "wasm32"))]
             cad_io: crate::cad_io::CadIo::default(),
             show_inspector: true,
@@ -1456,7 +1461,7 @@ impl MantisApp {
                 if ui.button("Commands…").on_hover_text("Rhino-style commands · Ctrl/Cmd+K").clicked() {
                     self.commands.show();
                 }
-                ui.toggle_value(&mut self.show_inspector, "Inputs").on_hover_text("Inspect and edit selected node inputs and outputs");
+                ui.toggle_value(&mut self.show_inspector, "Design").on_hover_text("Browse model dependencies, edit design dimensions, and inspect inputs and outputs");
                 #[cfg(not(target_arch = "wasm32"))]
                 if ui.button("CAD…").on_hover_text("Rhino / Grasshopper / STEP files and exact B-rep operations").clicked() {
                     self.cad_io.open = true;
@@ -1971,11 +1976,27 @@ impl eframe::App for MantisApp {
         if self.show_inspector {
             egui::SidePanel::left("mantis_inspector")
                 .resizable(true)
-                .default_width(210.0)
+                .default_width(245.0)
                 .min_width(160.0)
                 .max_width(360.0)
                 .show(ctx, |ui| {
-                    self.editor.inspector_ui(ui, &mut self.doc, &mut errors)
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.show_model, true, "Model");
+                        ui.selectable_value(&mut self.show_model, false, "Inputs");
+                    });
+                    ui.separator();
+                    if self.show_model {
+                        if self.design_panel.ui(
+                            ui,
+                            &mut self.doc,
+                            &mut self.editor.selection,
+                            &mut errors,
+                        ) {
+                            self.editor.focus_selection(&self.doc);
+                        }
+                    } else {
+                        self.editor.inspector_ui(ui, &mut self.doc, &mut errors);
+                    }
                 });
         }
         if self.show_chain {

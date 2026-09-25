@@ -210,11 +210,21 @@ struct AddMenu {
     just_opened: bool,
 }
 
+enum CanvasDrag {
+    Pan,
+    Select {
+        origin: egui::Pos2,
+        selection_before: BTreeSet<NodeId>,
+        additive: bool,
+    },
+}
+
 /// The node editor panel: view transform, selection and in-flight gestures.
 pub struct NodeEditor {
     pub pan: egui::Vec2,
     pub zoom: f32,
     pub selection: BTreeSet<NodeId>,
+    canvas_drag: Option<CanvasDrag>,
     wire_drag: Option<WireDrag>,
     add_menu: Option<AddMenu>,
 }
@@ -231,6 +241,7 @@ impl NodeEditor {
             pan: egui::vec2(60.0, 40.0),
             zoom: 1.0,
             selection: BTreeSet::new(),
+            canvas_drag: None,
             wire_drag: None,
             add_menu: None,
         }
@@ -269,7 +280,7 @@ impl NodeEditor {
             ui.monospace("Box 10 20 30");
             ui.weak("Ctrl / Cmd + K");
             ui.separator();
-            ui.weak("Select geometry, then run Move, ExtrudeCrv, Divide or Length. Shift-click selects several nodes.");
+            ui.weak("Select geometry, then run Move, ExtrudeCrv, Divide or Length. Drag empty space to select several nodes; hold Shift to add.");
             return;
         };
         let node = inspector_node(&doc.display_graph().nodes[&id]);
@@ -450,22 +461,53 @@ impl NodeEditor {
     pub fn ui(&mut self, ui: &mut egui::Ui, doc: &mut Document, errors: &mut Vec<String>) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() < 20.0 || rect.height() < 20.0 {
+            self.cancel_canvas_drag();
             return;
         }
         let canvas = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let editable = doc.editable();
 
+        if !ui.input(|i| i.focused) {
+            self.cancel_canvas_drag();
+        }
+        // Let egui's canvas response own the gesture so nodes, ports and
+        // inline widgets keep their own drags. Lock the mode until release.
+        if canvas.drag_started_by(egui::PointerButton::Primary)
+            && self.wire_drag.is_none()
+            && ui.input(|i| i.focused)
+        {
+            if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+                self.canvas_drag = Some(
+                    if ui.input(|i| i.key_down(egui::Key::Space))
+                        && !ui.ctx().wants_keyboard_input()
+                    {
+                        CanvasDrag::Pan
+                    } else {
+                        CanvasDrag::Select {
+                            origin,
+                            selection_before: self.selection.clone(),
+                            additive: ui.input(|i| i.modifiers.shift),
+                        }
+                    },
+                );
+                self.add_menu = None;
+            }
+        }
+
         // ---- view navigation --------------------------------------------
-        if canvas.dragged_by(egui::PointerButton::Primary) && self.wire_drag.is_none() {
+        if canvas.dragged_by(egui::PointerButton::Primary)
+            && matches!(self.canvas_drag, Some(CanvasDrag::Pan))
+        {
             self.pan += canvas.drag_delta();
         }
+        let selecting = matches!(self.canvas_drag, Some(CanvasDrag::Select { .. }));
         let (middle_down, pointer_delta) =
             ui.input(|i| (i.pointer.middle_down(), i.pointer.delta()));
-        if middle_down && ui.rect_contains_pointer(rect) {
+        if middle_down && ui.rect_contains_pointer(rect) && !selecting {
             self.pan += pointer_delta;
         }
-        if ui.rect_contains_pointer(rect) && self.add_menu.is_none() {
+        if ui.rect_contains_pointer(rect) && self.add_menu.is_none() && !selecting {
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll.abs() > 0.1 {
                 if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
@@ -512,6 +554,7 @@ impl NodeEditor {
 
         // ---- layouts + wires ----------------------------------------------
         let layouts = build_layouts(doc, &xf);
+        let selection_rect = self.canvas_selection_ui(ui, &canvas, &layouts);
         let index: BTreeMap<NodeId, usize> =
             layouts.iter().enumerate().map(|(i, l)| (l.id, i)).collect();
         let edges: Vec<Edge> = doc.display_graph().edges.clone();
@@ -552,6 +595,17 @@ impl NodeEditor {
         self.add_menu_ui(ui, doc, errors);
 
         // ---- overlays -------------------------------------------------------
+        if matches!(self.canvas_drag, Some(CanvasDrag::Select { .. })) {
+            if let Some(selection_rect) = selection_rect {
+                painter.rect_filled(selection_rect, 0.0, SELECT.gamma_multiply(0.12));
+                painter.rect_stroke(
+                    selection_rect,
+                    0.0,
+                    egui::Stroke::new(1.0, SELECT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
         if !editable {
             painter.text(
                 rect.center_top() + egui::vec2(0.0, 16.0),
@@ -569,13 +623,75 @@ impl NodeEditor {
                 TEXT_DIM,
             );
         }
-        painter.text(
-            rect.left_bottom() + egui::vec2(8.0, -6.0),
-            egui::Align2::LEFT_BOTTOM,
-            "right-click add · drag ports to wire · Del remove · Ctrl/Cmd+Z undo · scroll zoom",
+        let hint_color = egui::Color32::from_rgb(0x6e, 0x76, 0x82);
+        let hint = painter.layout(
+            "drag select · Shift add · middle/Space-drag pan · right-click add · drag ports to wire · Del remove · Ctrl/Cmd+Z undo · scroll zoom".into(),
             egui::FontId::proportional(10.5),
-            egui::Color32::from_rgb(0x6e, 0x76, 0x82),
+            hint_color,
+            rect.width() - 16.0,
         );
+        painter.galley(
+            rect.left_bottom() + egui::vec2(8.0, -6.0 - hint.size().y),
+            hint,
+            hint_color,
+        );
+    }
+
+    fn canvas_selection_ui(
+        &mut self,
+        ui: &egui::Ui,
+        canvas: &egui::Response,
+        layouts: &[Layout],
+    ) -> Option<egui::Rect> {
+        // keyboard() restores the snapshot, including when Escape and the
+        // pointer release arrive in the same frame.
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return None;
+        }
+        let mut selection_rect = None;
+        if let Some(CanvasDrag::Select {
+            origin,
+            selection_before,
+            additive,
+        }) = &self.canvas_drag
+        {
+            if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                let rect = egui::Rect::from_two_pos(
+                    canvas.rect.clamp(*origin),
+                    canvas.rect.clamp(pointer),
+                );
+                // Recompute from the initial selection so shrinking the box
+                // removes transient hits, including during Shift-drag.
+                self.selection = if *additive {
+                    selection_before.clone()
+                } else {
+                    BTreeSet::new()
+                };
+                self.selection.extend(
+                    layouts
+                        .iter()
+                        .filter(|l| rect.intersects(l.rect))
+                        .map(|l| l.id),
+                );
+                selection_rect = Some(rect);
+            }
+        }
+        // Include the release position before finishing, even outside the
+        // canvas. Selection is view state and creates no document edits.
+        if canvas.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            self.canvas_drag = None;
+            selection_rect = None;
+        }
+        selection_rect
+    }
+
+    fn cancel_canvas_drag(&mut self) {
+        if let Some(CanvasDrag::Select {
+            selection_before, ..
+        }) = self.canvas_drag.take()
+        {
+            self.selection = selection_before;
+        }
     }
 
     fn draw_grid(&self, painter: &egui::Painter, rect: egui::Rect, xf: &ViewXf) {
@@ -1067,6 +1183,8 @@ impl NodeEditor {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.add_menu.is_some() {
                 self.add_menu = None;
+            } else if self.canvas_drag.is_some() {
+                self.cancel_canvas_drag();
             } else if self.wire_drag.is_some() {
                 self.wire_drag = None;
             } else {
@@ -1353,8 +1471,11 @@ fn build_layouts(doc: &Document, xf: &ViewXf) -> Vec<Layout> {
 }
 
 // ---------------------------------------------------------------------------
-// tests (pure logic only)
+// tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod interaction_tests;
 
 #[cfg(test)]
 mod tests {

@@ -129,3 +129,13 @@ Windows 패키징은 실행 파일의 DLL 의존성을 확인하고 필요한 Mi
 GitHub의 `Native release` 워크플로도 같은 스크립트를 사용합니다.
 수동 실행은 다운로드 가능한 CI 아티팩트를 만들고, 버전 태그로 실행하면
 검증 후 GitHub Release에 게시합니다.
+
+앱 아이콘의 원본은 `packaging/mantis-cad.svg`입니다. 함께 저장된 PNG는
+앱 창에서, ICO는 Windows 실행 파일·설치 프로그램·제거 프로그램에서
+사용합니다. 일반 빌드에는 이미지 변환 도구가 필요하지 않습니다.
+원본 디자인을 변경한 경우 CairoSVG와 Pillow(Cairo 라이브러리 필요)를
+설치한 개발 환경에서 다음 명령으로 PNG와 ICO를 다시 생성하세요.
+
+```bash
+python3 packaging/generate_icons.py
+```

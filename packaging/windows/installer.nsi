@@ -17,6 +17,8 @@ VIAddVersionKey "FileDescription" "MantisCAD per-user installer"
 VIAddVersionKey "LegalCopyright" "MantisCAD contributors (MIT)"
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "${MANTIS_ICON}"
+!define MUI_UNICON "${MANTIS_ICON}"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\MantisCAD.exe"
 !define MUI_FINISHPAGE_RUN_NOTCHECKED
 !insertmacro MUI_PAGE_WELCOME
@@ -78,14 +80,14 @@ install_safe:
   FileClose $0
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\MantisCAD"
-  CreateShortcut "$SMPROGRAMS\MantisCAD\MantisCAD.lnk" "$INSTDIR\MantisCAD.exe"
-  CreateShortcut "$SMPROGRAMS\MantisCAD\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
+  CreateShortcut "$SMPROGRAMS\MantisCAD\MantisCAD.lnk" "$INSTDIR\MantisCAD.exe" "" "$INSTDIR\MantisCAD.exe" 0
+  CreateShortcut "$SMPROGRAMS\MantisCAD\Uninstall.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\Uninstall.exe" 0
   WriteRegStr HKCU "Software\MantisCAD" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "DisplayName" "MantisCAD"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "Publisher" "MantisCAD contributors"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "DisplayIcon" "$INSTDIR\MantisCAD.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "DisplayIcon" '"$INSTDIR\MantisCAD.exe",0'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /S'
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MantisCAD" "NoModify" 1
