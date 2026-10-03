@@ -258,6 +258,7 @@ impl Document {
         if target == self.view_index {
             return Ok(());
         }
+        self.end_gesture();
         match target {
             Some(i) => {
                 let g = self
@@ -315,6 +316,7 @@ impl Document {
         if !self.editable() {
             return Err("read-only: viewing chain history".into());
         }
+        self.end_gesture();
         self.graph.apply(&op).map_err(|e| e.to_string())?;
         self.record_history_boundary();
         self.invalidate_for(&op);
@@ -336,6 +338,7 @@ impl Document {
         let mut next = self.graph.clone();
         next.apply_all(&ops)
             .map_err(|(i, e)| format!("operation {} failed: {e}", i + 1))?;
+        self.end_gesture();
         self.record_history_boundary();
         self.graph = next;
         for op in &ops {
@@ -518,6 +521,9 @@ impl Document {
     /// Finish the active param gesture: exactly one `SetParam` op is recorded
     /// (none if the value ended where it started, or the node vanished).
     pub fn end_param_drag(&mut self) {
+        if !matches!(self.gesture, Some(Gesture::Param { .. })) {
+            return;
+        }
         if let Some(Gesture::Param {
             id,
             key,
@@ -584,6 +590,9 @@ impl Document {
 
     /// Finish the node-drag gesture: one `MoveNode` per node that moved.
     pub fn end_move(&mut self) {
+        if !matches!(self.gesture, Some(Gesture::Move { .. })) {
+            return;
+        }
         if let Some(Gesture::Move { start }) = self.gesture.take() {
             let mut ops = Vec::new();
             for (id, start_pos) in start {
@@ -969,6 +978,50 @@ mod tests {
     }
 
     #[test]
+    fn scene_refresh_uses_the_current_registered_component() {
+        use mantis_graph::{Component, PortSpec, Value, ValueKind};
+
+        struct ReplacementSlider;
+        impl Component for ReplacementSlider {
+            fn type_name(&self) -> &'static str {
+                "number_slider"
+            }
+            fn label(&self) -> &'static str {
+                "Replacement slider"
+            }
+            fn category(&self) -> &'static str {
+                "Params"
+            }
+            fn inputs(&self) -> Vec<PortSpec> {
+                vec![]
+            }
+            fn outputs(&self) -> Vec<PortSpec> {
+                vec![PortSpec::item("value", ValueKind::Number)]
+            }
+            fn eval(
+                &self,
+                _inputs: &[Value],
+                _params: &BTreeMap<String, ParamValue>,
+            ) -> Result<Vec<Value>, String> {
+                Ok(vec![Value::Number(42.0)])
+            }
+        }
+
+        let mut d = doc("a");
+        add(&mut d, 1, "number_slider");
+        d.set_param(nid(1), "value", ParamValue::Number(7.0))
+            .unwrap();
+        d.evaluate();
+        assert_eq!(d.last_eval.outputs[&nid(1)][0], Value::Number(7.0));
+
+        d.registry.register(std::sync::Arc::new(ReplacementSlider));
+        d.mark_scene_dirty();
+        d.evaluate();
+        assert_eq!(d.last_eval.outputs[&nid(1)][0], Value::Number(42.0));
+        assert_eq!(d.replay_pending(&d.pending).unwrap(), d.graph);
+    }
+
+    #[test]
     fn batch_edit_is_atomic_and_one_undo_step() {
         let mut d = doc("a");
         add(&mut d, 1, "number_slider");
@@ -1027,6 +1080,107 @@ mod tests {
         assert!(!d.gesture_active());
         assert!(!d.graph.nodes[&nid(1)].params.contains_key("value"));
         assert!(d.can_redo());
+    }
+
+    #[test]
+    fn one_shot_edit_records_live_param_before_the_next_value() {
+        let mut d = doc("a");
+        add(&mut d, 1, "number_slider");
+        d.commit("base", 1).unwrap();
+        d.param_drag(nid(1), "value", ParamValue::Number(7.0));
+        d.set_param(nid(1), "value", ParamValue::Number(9.0))
+            .unwrap();
+
+        assert!(!d.gesture_active());
+        assert_eq!(d.replay_pending(&d.pending).unwrap(), d.graph);
+        assert_eq!(d.undo_pending().unwrap(), 1);
+        assert_eq!(
+            d.graph.nodes[&nid(1)].params["value"],
+            ParamValue::Number(7.0)
+        );
+        assert_eq!(d.undo_pending().unwrap(), 1);
+        assert!(!d.graph.nodes[&nid(1)].params.contains_key("value"));
+        d.redo_pending().unwrap();
+        d.redo_pending().unwrap();
+        d.commit("edits", 2).unwrap();
+        assert_eq!(d.chain.replay(None).unwrap(), d.graph);
+        assert_eq!(
+            d.graph.nodes[&nid(1)].params["value"],
+            ParamValue::Number(9.0)
+        );
+    }
+
+    #[test]
+    fn deleting_nodes_during_a_move_preserves_the_move_for_undo() {
+        let mut d = doc("a");
+        add(&mut d, 1, "number_slider");
+        add(&mut d, 2, "panel");
+        d.commit("base", 1).unwrap();
+        d.begin_move([nid(1), nid(2)]);
+        d.move_live(nid(1), (17.0, 9.0));
+        d.move_live(nid(2), (30.0, 40.0));
+        d.apply_ops(vec![
+            GraphOp::RemoveNode { id: nid(1) },
+            GraphOp::RemoveNode { id: nid(2) },
+        ])
+        .unwrap();
+
+        assert!(!d.gesture_active());
+        assert_eq!(d.undo_pending().unwrap(), 2);
+        assert_eq!(d.graph.nodes[&nid(1)].pos, (17.0, 9.0));
+        assert_eq!(d.graph.nodes[&nid(2)].pos, (30.0, 40.0));
+        assert_eq!(d.undo_pending().unwrap(), 2);
+        assert_eq!(d.graph, d.chain.replay(None).unwrap());
+    }
+
+    #[test]
+    fn history_view_records_live_param_so_a_snapshot_can_restore_it() {
+        let mut d = doc("a");
+        add(&mut d, 1, "number_slider");
+        d.commit("base", 1).unwrap();
+        d.param_drag(nid(1), "value", ParamValue::Number(7.0));
+        d.set_view(Some(0)).unwrap();
+
+        assert!(!d.gesture_active());
+        assert!(d.display_graph().nodes.is_empty());
+        let mut restored = Document::restore(
+            Identity::generate("restored"),
+            d.chain.clone(),
+            d.pending.clone(),
+            d.recovery_ops.clone(),
+            d.view_index(),
+        )
+        .unwrap();
+        restored.set_view(None).unwrap();
+        assert_eq!(restored.graph, d.graph);
+        assert_eq!(
+            restored.graph.nodes[&nid(1)].params["value"],
+            ParamValue::Number(7.0)
+        );
+        d.set_view(None).unwrap();
+        assert_eq!(d.undo_pending().unwrap(), 1);
+        assert!(!d.graph.nodes[&nid(1)].params.contains_key("value"));
+    }
+
+    #[test]
+    fn finishing_another_gesture_kind_keeps_the_active_edit() {
+        let mut d = doc("a");
+        add(&mut d, 1, "number_slider");
+        d.commit("base", 1).unwrap();
+        d.param_drag(nid(1), "value", ParamValue::Number(7.0));
+        d.end_move();
+        assert!(d.gesture_active());
+        d.end_param_drag();
+        assert_eq!(d.replay_pending(&d.pending).unwrap(), d.graph);
+
+        d.begin_move([nid(1)]);
+        d.move_live(nid(1), (17.0, 9.0));
+        d.end_param_drag();
+        assert!(d.gesture_active());
+        d.end_move();
+        assert_eq!(d.replay_pending(&d.pending).unwrap(), d.graph);
+        d.commit("edits", 2).unwrap();
+        assert_eq!(d.chain.replay(None).unwrap(), d.graph);
     }
 
     #[test]

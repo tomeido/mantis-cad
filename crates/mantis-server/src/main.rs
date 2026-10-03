@@ -526,7 +526,17 @@ fn serve_static_policy(
     {
         return static_error(400, "path traversal rejected");
     }
-    let full = dist.join(&rel_path);
+    // Resolve both paths so symlinks cannot escape the asset directory while
+    // links to files or directories within it remain supported.
+    let Ok(root) = dist.canonicalize() else {
+        return static_error(404, "not found");
+    };
+    let Ok(full) = root.join(&rel_path).canonicalize() else {
+        return static_error(404, "not found");
+    };
+    if !full.starts_with(&root) {
+        return static_error(400, "path traversal rejected");
+    }
     match std::fs::read(&full) {
         Ok(bytes) => {
             let is_html = matches!(
@@ -2686,6 +2696,53 @@ mod tests {
 
         let _ = std::fs::remove_file(&secret);
         let _ = std::fs::remove_dir_all(&dist);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_symlinks_stay_within_asset_root() {
+        use std::os::unix::fs::symlink;
+
+        let dist = make_dist();
+        // A sibling with the same textual prefix also tests component-aware
+        // containment rather than a string-prefix comparison.
+        let outside = PathBuf::from(format!("{}-outside", dist.display()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "private file contents").unwrap();
+        std::fs::write(outside.join("index.html"), "private directory contents").unwrap();
+        symlink(outside.join("secret.txt"), dist.join("file-link.txt")).unwrap();
+        symlink(&outside, dist.join("directory-link")).unwrap();
+        symlink("assets/style.css", dist.join("internal.css")).unwrap();
+        symlink("assets", dist.join("internal-assets")).unwrap();
+        symlink(outside.join("missing.txt"), dist.join("broken-link.txt")).unwrap();
+
+        for legacy_wildcard_cors in [true, false] {
+            for path in [
+                "/file-link.txt",
+                "/directory-link/secret.txt",
+                "/directory-link/",
+            ] {
+                let response = serve_static_policy(&dist, path, legacy_wildcard_cors);
+                assert_eq!(response.status_code().0, 400, "{path}");
+                let mut body = String::new();
+                response.into_reader().read_to_string(&mut body).unwrap();
+                assert!(!body.contains("private"), "{path} leaked: {body}");
+            }
+            for path in ["/internal.css", "/internal-assets/style.css"] {
+                let response = serve_static_policy(&dist, path, legacy_wildcard_cors);
+                assert_eq!(response.status_code().0, 200, "{path}");
+                let mut body = String::new();
+                response.into_reader().read_to_string(&mut body).unwrap();
+                assert_eq!(body, "body{}", "{path}");
+            }
+            for path in ["/broken-link.txt", "/missing.txt"] {
+                let response = serve_static_policy(&dist, path, legacy_wildcard_cors);
+                assert_eq!(response.status_code().0, 404, "{path}");
+            }
+        }
+
+        std::fs::remove_dir_all(&dist).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]

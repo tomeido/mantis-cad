@@ -20,7 +20,7 @@
 //!   -> error "input <name> missing".
 //! - Component eval Err(msg) -> node error; outputs absent for errored nodes.
 //! - Cache: a node re-evaluates iff marked dirty (invalidate/invalidate_all),
-//!   its type/parameters/wiring changed, or an upstream output changed;
+//!   its type/parameters/wiring/component changed, or an upstream output changed;
 //!   otherwise cached outputs are reused. The evaluator detects graph edits
 //!   itself, so callers do not have to get cache invalidation exactly right.
 
@@ -28,6 +28,7 @@ use crate::component::{Access, Component, PortSpec, Registry};
 use crate::graph::{Edge, Graph, NodeId};
 use crate::value::{ParamValue, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EvalOutput {
@@ -38,9 +39,10 @@ pub struct EvalOutput {
 
 /// Reusable evaluator holding the cache across frames.
 ///
-/// Each cache entry includes the evaluation-relevant part of the node and its
-/// incoming wiring. `evaluate` therefore remains correct even when a caller
-/// applies a `GraphOp` without explicitly calling `invalidate`. The explicit
+/// Each cache entry includes the evaluation-relevant part of the node, its
+/// incoming wiring, and the component instance that produced its outputs.
+/// `evaluate` therefore remains correct when a caller applies a `GraphOp` or
+/// replaces a registered component without calling `invalidate`. The explicit
 /// invalidation methods remain useful when external component state changes.
 #[derive(Default)]
 pub struct Evaluator {
@@ -75,6 +77,7 @@ impl CacheSignature {
 #[derive(Clone)]
 struct CacheEntry {
     signature: CacheSignature,
+    component: Arc<dyn Component>,
     outputs: Vec<Value>,
 }
 
@@ -164,7 +167,7 @@ impl Evaluator {
             let mut needs = self
                 .cache
                 .get(&id)
-                .map(|entry| entry.signature != signature)
+                .map(|entry| entry.signature != signature || !Arc::ptr_eq(&entry.component, &comp))
                 .unwrap_or(true);
             let mut upstream_err = false;
             for i in 0..specs.len() {
@@ -213,6 +216,7 @@ impl Evaluator {
                         id,
                         CacheEntry {
                             signature,
+                            component: comp,
                             outputs: vals,
                         },
                     );
@@ -563,7 +567,10 @@ mod tests {
     }
 
     /// Test-only component that counts how many times it is evaluated.
-    struct Counter(Arc<AtomicUsize>);
+    struct Counter {
+        evals: Arc<AtomicUsize>,
+        factor: f64,
+    }
     impl Component for Counter {
         fn type_name(&self) -> &'static str {
             "test_counter"
@@ -585,8 +592,10 @@ mod tests {
             inputs: &[Value],
             _params: &BTreeMap<String, ParamValue>,
         ) -> Result<Vec<Value>, String> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![inputs[0].clone()])
+            self.evals.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![Value::Number(
+                inputs[0].as_number().expect("number") * self.factor,
+            )])
         }
     }
 
@@ -594,7 +603,10 @@ mod tests {
     fn cache_skips_clean_branches() {
         let evals = Arc::new(AtomicUsize::new(0));
         let mut reg = Registry::standard();
-        reg.register(Arc::new(Counter(evals.clone())));
+        reg.register(Arc::new(Counter {
+            evals: evals.clone(),
+            factor: 1.0,
+        }));
 
         let mut g = Graph::new();
         slider(&mut g, 1, 1.0);
@@ -631,6 +643,73 @@ mod tests {
         ev.invalidate_all();
         ev.evaluate(&g, &reg);
         assert_eq!(evals.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn cache_detects_registered_component_replacement() {
+        let evals = Arc::new(AtomicUsize::new(0));
+        let mut reg = Registry::standard();
+        reg.register(Arc::new(Counter {
+            evals: evals.clone(),
+            factor: 1.0,
+        }));
+        let mut g = Graph::new();
+        slider(&mut g, 1, 2.0);
+        add_node(&mut g, 2, "test_counter");
+        connect(&mut g, (1, 0), (2, 0));
+        add_node(&mut g, 3, "negate");
+        connect(&mut g, (2, 0), (3, 0));
+        let mut ev = Evaluator::new();
+
+        let initial = ev.evaluate(&g, &reg);
+        assert!(initial.errors.is_empty());
+        assert_eq!(initial.outputs[&nid(3)][0], Value::Number(-2.0));
+        assert_eq!(evals.load(Ordering::SeqCst), 1);
+
+        // Cloning a registry retains component instances and cached outputs.
+        assert_eq!(ev.evaluate(&g, &reg.clone()), initial);
+        assert_eq!(evals.load(Ordering::SeqCst), 1);
+
+        reg.register(Arc::new(Counter {
+            evals: evals.clone(),
+            factor: 3.0,
+        }));
+        let replaced = ev.evaluate(&g, &reg);
+        assert!(replaced.errors.is_empty());
+        assert_eq!(replaced.outputs[&nid(2)][0], Value::Number(6.0));
+        assert_eq!(replaced.outputs[&nid(3)][0], Value::Number(-6.0));
+        assert_eq!(evals.load(Ordering::SeqCst), 2);
+        assert_eq!(ev.evaluate(&g, &reg), replaced);
+        assert_eq!(evals.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn cache_detects_switching_between_registries() {
+        let evals = Arc::new(AtomicUsize::new(0));
+        let mut first = Registry::standard();
+        first.register(Arc::new(Counter {
+            evals: evals.clone(),
+            factor: 1.0,
+        }));
+        let mut second = first.clone();
+        second.register(Arc::new(Counter {
+            evals: evals.clone(),
+            factor: 4.0,
+        }));
+        let mut g = Graph::new();
+        slider(&mut g, 1, 2.0);
+        add_node(&mut g, 2, "test_counter");
+        connect(&mut g, (1, 0), (2, 0));
+        let mut ev = Evaluator::new();
+
+        for (registry, value) in [(&first, 2.0), (&second, 8.0), (&first, 2.0)] {
+            let cached = ev.evaluate(&g, registry);
+            let fresh = Evaluator::new().evaluate(&g, registry);
+            assert!(cached.errors.is_empty());
+            assert_eq!(cached.outputs[&nid(2)][0], Value::Number(value));
+            assert_eq!(cached, fresh);
+        }
+        assert_eq!(evals.load(Ordering::SeqCst), 6);
     }
 
     #[test]

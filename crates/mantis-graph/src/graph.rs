@@ -318,10 +318,12 @@ impl Graph {
     /// Nodes in cycles are omitted (cannot happen via `apply`, but be safe).
     pub fn topo_order(&self) -> Vec<NodeId> {
         let mut indeg: BTreeMap<NodeId, usize> = self.nodes.keys().map(|id| (*id, 0)).collect();
+        let mut outgoing: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
         for e in &self.edges {
             if let Some(d) = indeg.get_mut(&e.to.0) {
                 if self.nodes.contains_key(&e.from.0) {
                     *d += 1;
+                    outgoing.entry(e.from.0).or_default().push(e.to.0);
                 }
             }
         }
@@ -334,12 +336,13 @@ impl Graph {
         while let Some(&n) = ready.iter().next() {
             ready.remove(&n);
             order.push(n);
-            for e in self.edges.iter().filter(|e| e.from.0 == n) {
-                if let Some(d) = indeg.get_mut(&e.to.0) {
-                    *d -= 1;
-                    if *d == 0 {
-                        ready.insert(e.to.0);
-                    }
+            // Visit each wire once rather than scan all wires for every node.
+            // Keep parallel wires: each contributes one indegree increment.
+            for to in outgoing.get(&n).into_iter().flatten() {
+                let d = indeg.get_mut(to).expect("outgoing target exists");
+                *d -= 1;
+                if *d == 0 {
+                    ready.insert(*to);
                 }
             }
         }
@@ -461,5 +464,31 @@ mod tests {
         let pos1 = order.iter().position(|n| *n == nid(1)).unwrap();
         assert!(pos9 < pos1);
         assert_eq!(order[0], nid(3));
+    }
+
+    #[test]
+    fn topo_order_preserves_parallel_wires_and_ready_node_ties() {
+        let mut g = Graph::new();
+        for i in [5u128, 4, 3, 2, 1] {
+            g.apply(&GraphOp::AddNode {
+                id: nid(i),
+                type_name: "t".into(),
+                pos: (0.0, 0.0),
+            })
+            .unwrap();
+        }
+        // Node 1 unlocks 2 and 3 in reverse order. Both must precede the
+        // already-ready node 4, and two wires must not leave node 2 blocked.
+        for (from, to) in [((1, 0), (3, 0)), ((1, 0), (2, 0)), ((1, 1), (2, 1))] {
+            g.apply(&GraphOp::Connect {
+                from: (nid(from.0), from.1),
+                to: (nid(to.0), to.1),
+            })
+            .unwrap();
+        }
+
+        assert_eq!(g.topo_order(), vec![nid(1), nid(2), nid(3), nid(4), nid(5)]);
+        g.edges.reverse();
+        assert_eq!(g.topo_order(), vec![nid(1), nid(2), nid(3), nid(4), nid(5)]);
     }
 }

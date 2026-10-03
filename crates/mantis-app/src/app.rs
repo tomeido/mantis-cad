@@ -134,10 +134,14 @@ impl MantisApp {
         let identity = get(K_SECRET)
             .and_then(|secret| Identity::from_secret_hex(&name, &secret).ok())
             .unwrap_or_else(|| Identity::generate(&name));
-        let doc = Document::new_scoped(identity)
-            .expect("secure randomness is required to create a scoped workspace");
         let url = get(K_URL).unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
         let background_check = get(K_AUTO).as_deref() == Some("1");
+        Self::with_identity(identity, url, background_check)
+    }
+
+    fn with_identity(identity: Identity, url: String, background_check: bool) -> MantisApp {
+        let doc = Document::new_scoped(identity)
+            .expect("secure randomness is required to create a scoped workspace");
         let public = doc.identity.public_hex();
         let id = format!("local-{}", &public[..12]);
         let web_remote = cfg!(target_arch = "wasm32");
@@ -463,6 +467,9 @@ impl MantisApp {
 
     fn persist_now(&mut self) {
         if !self.storage_ready || self.storage_disabled || self.corrupt_catalog.is_some() {
+            // Workspace transitions still need a current in-memory snapshot
+            // when durable storage is unavailable.
+            self.refresh_catalog(true);
             return;
         }
         match self.catalog_json(true) {
@@ -502,6 +509,7 @@ impl MantisApp {
         if id == self.catalog.active_id {
             return Ok(());
         }
+        self.doc.end_gesture();
         self.persist_now();
         let snapshot = self
             .catalog
@@ -549,6 +557,7 @@ impl MantisApp {
     }
 
     fn create_workspace(&mut self, name: &str) -> Result<(), String> {
+        self.doc.end_gesture();
         self.persist_now();
         let id = next_workspace_id(&self.catalog);
         let identity =
@@ -592,6 +601,7 @@ impl MantisApp {
     }
 
     fn duplicate_workspace(&mut self) -> Result<(), String> {
+        self.doc.end_gesture();
         self.persist_now();
         let mut copy = self.snapshot(true);
         copy.id = next_workspace_id(&self.catalog);
@@ -1683,6 +1693,7 @@ impl MantisApp {
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Export active workspace").clicked() {
+                        self.doc.end_gesture();
                         let result = self
                             .snapshot(true)
                             .to_portable()
@@ -2183,6 +2194,75 @@ fn generated_backup_matches(dialog: &KeyBackupDialog, public_key: &str) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mantis_graph::{GraphOp, ParamValue};
+
+    fn memory_app() -> MantisApp {
+        let mut app =
+            MantisApp::with_identity(Identity::generate("test"), DEFAULT_SERVER_URL.into(), false);
+        // Exercise unavailable persistence without writing to the user's store.
+        app.storage_disabled = true;
+        app.doc
+            .apply_op(GraphOp::AddNode {
+                id: NodeId(1),
+                type_name: "number_slider".into(),
+                pos: (0.0, 0.0),
+            })
+            .unwrap();
+        app
+    }
+
+    #[test]
+    fn workspace_transitions_preserve_live_edits_without_durable_storage() {
+        let mut app = memory_app();
+        let first_id = app.catalog.active_id.clone();
+        app.doc
+            .param_drag(NodeId(1), "value", ParamValue::Number(7.0));
+        let expected = app.doc.graph.clone();
+
+        app.create_workspace("second").unwrap();
+        let second_id = app.catalog.active_id.clone();
+        app.switch_workspace(&first_id).unwrap();
+        assert_eq!(app.doc.graph, expected);
+        assert!(!app.doc.gesture_active());
+
+        app.doc.begin_move([NodeId(1)]);
+        app.doc.move_live(NodeId(1), (17.0, 9.0));
+        let expected = app.doc.graph.clone();
+        app.switch_workspace(&second_id).unwrap();
+        app.switch_workspace(&first_id).unwrap();
+        assert_eq!(app.doc.graph, expected);
+        app.catalog.validate().unwrap();
+    }
+
+    #[test]
+    fn duplicate_workspace_captures_live_edits_and_keeps_each_copy() {
+        let mut app = memory_app();
+        let original_id = app.catalog.active_id.clone();
+        app.doc
+            .param_drag(NodeId(1), "value", ParamValue::Number(7.0));
+        let expected = app.doc.graph.clone();
+
+        app.duplicate_workspace().unwrap();
+        let copy_id = app.catalog.active_id.clone();
+        assert_ne!(original_id, copy_id);
+        assert!(!app.doc.gesture_active());
+        let portable = app.snapshot(false).to_portable().unwrap();
+        let mut replay = portable.chain.replay(None).unwrap();
+        replay.apply_all(&portable.pending).unwrap();
+        assert_eq!(replay, expected);
+
+        app.doc
+            .set_param(NodeId(1), "value", ParamValue::Number(9.0))
+            .unwrap();
+        app.switch_workspace(&original_id).unwrap();
+        assert_eq!(app.doc.graph, expected);
+        app.switch_workspace(&copy_id).unwrap();
+        assert_eq!(
+            app.doc.graph.nodes[&NodeId(1)].params["value"],
+            ParamValue::Number(9.0)
+        );
+        app.catalog.validate().unwrap();
+    }
 
     #[test]
     fn persisted_camera_is_restored_exactly() {
