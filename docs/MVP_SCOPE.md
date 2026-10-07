@@ -65,12 +65,16 @@ cargo test --locked --workspace
 ## 명시적 가정
 
 1. 여기서 “Grasshopper 정의”는 **Mantis의 GH-style `Graph`**를 뜻합니다.
-   Rhino/Grasshopper native `.gh`, `.ghx`, `.3dm` import는 현재 없으며, 이 파일들을
-   직접 비교하는 제품으로 간주하지 않습니다.
+   네이티브 앱은 기본 GHX importer와 선택형 호환팩의 `.gh`·`.3dm`·STEP
+   가져오기를 제공합니다. `diff`의 입력은 Mantis chain JSON이며 가져온 결과도
+   커밋 후 비교할 수 있습니다. 원본 CAD 파일을 직접 비교하지 않습니다. 지원 범위는
+   [`INTEROP.md`](INTEROP.md)를 따릅니다.
 2. revision은 하나의 검증된 Mantis 체인 안의 committed block 인덱스입니다.
    genesis는 0이며 pending/undo 작업 상태는 비교하지 않습니다.
-3. 권위 있는 변경 기록은 `GraphOp`입니다. 형상·면적·체적·fingerprint는
-   체인에 서명된 값이 아니라 보고서를 만드는 시점의 파생 값입니다.
+3. 권위 있는 변경 기록은 `GraphOp`입니다. 기본 컴포넌트의 형상 출력은
+   파생 값이며, 가져온 CAD 원본·미리보기와 외부 B-rep 결과는 예외로
+   노드 파라미터에 기록되어 커밋 후 서명 범위에 포함됩니다. 비교 보고서의
+   형상 요약·면적·체적·fingerprint는 보고서를 만드는 시점의 파생 값입니다.
 4. 형상 범위는 GUI 뷰포트와 맞춘 `__preview=true` 노드의 `Vector`, `Curve`,
    `Mesh` 출력입니다. 숨겨진 노드와 스칼라/텍스트/평면 출력은 형상 장면에
    포함하지 않습니다.
@@ -95,7 +99,7 @@ cargo test --locked --workspace
 
 다음은 1주 비범위입니다.
 
-- `.gh`, `.ghx`, `.3dm` parser 또는 Rhino/Grasshopper SDK 연동
+- `.gh`, `.ghx`, `.3dm`, STEP 원본 파일의 직접 비교와 완전한 Rhino/Grasshopper 호환
 - 공차 기반 B-rep/토폴로지 동치성 판정
 - 두 독립 체인의 3-way diff/merge, 미커밋 working graph diff
 - GUI·서버 API에서의 diff 시각화·저장·공유
@@ -105,7 +109,7 @@ cargo test --locked --workspace
 
 | 항목 | 영향 | MVP 대응 |
 |---|---|---|
-| Native 파일 import 부재 | 실제 Rhino/Grasshopper `.gh`/`.ghx`/`.3dm` 산출물을 직접 비교하려는 사용자에게는 blocker | 입력을 Mantis chain JSON으로 한정하고 제품 경계를 명시 |
+| Native 파일 직접 비교·완전 호환 부재 | 지원 외 컴포넌트, 전체 Data Tree, 외부 Rhino 형상 참조 등은 가져온 그래프로 복원되지 않음 | 지원되는 결과를 Mantis 체인에 커밋해 비교하고, 제외된 항목은 가져오기 진단과 `INTEROP.md`에서 확인 |
 | 현재 엔진으로 재평가 | 같은 체인이라도 컴포넌트/커널 구현이 바뀌면 과거에 보았던 형상과 다른 보고서가 나올 수 있음 | 결과에 `engine_version`을 남기고 파생 보고서임을 명시 |
 | 체인에 evaluator version 미고정 | `engine_version`은 보고서 생성 바이너리의 package version일 뿐이며, 각 커밋이 사용한 레지스트리/커널을 재현하지 못함 | 아카이브 동치성이 아닌 현재 뷰로 판독하고 후속 버전 계약으로 분리 |
 | Preview-only 장면 | `__preview=false` 지오메트리와 비시각 출력의 변경은 형상 차이에 잡히지 않음 | 정의 순변화는 별도 보고하고 형상은 “visible preview”로 표기 |
@@ -129,9 +133,8 @@ timestamp는 재현 가능한 fixture이지 평가기 mock이 아닙니다.
    compatibility mode로 실행합니다.
 2. `diff`에 연산·노드·출력 객체·리스트 항목·보고서 바이트 budget을
    추가하고, 취소/timeout과 summary-only 모드를 정의해 대용량 입력을 제어합니다.
-3. 먼저 문서형 XML인 `.ghx` read-only importer를 스파이크하고, 컴포넌트/port/ID
-   mapping과 unsupported-item 보고서를 만든 뒤 `.gh`/`.3dm`은 Rhino 연동 방식을
-   별도로 결정합니다.
+3. 구현된 GHX·GH·3DM·STEP 가져오기의 fixture와 진단 회귀 검증을 확장하고,
+   지원 외 컴포넌트·포트·데이터 구조의 처리 범위를 `INTEROP.md`와 함께 관리합니다.
 4. `--geometry-scope preview|all` 계약을 설계하고, hidden 노드·비시각 기하
    출력의 포함 규칙과 completeness 표시를 테스트합니다.
 5. 메시에 공차 기반 정규화/거리 지표를 추가하고, 장기적으로 B-rep 또는
