@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn example_chain() -> PathBuf {
@@ -9,14 +10,65 @@ fn example_chain() -> PathBuf {
 }
 
 fn run_diff(extra_args: &[&str]) -> Output {
+    run_diff_for_path(&example_chain(), extra_args)
+}
+
+fn run_diff_for_path(path: &Path, extra_args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mantis-cli"))
         .arg("diff")
-        .arg(example_chain())
+        .arg(path)
         .args(extra_args)
         // Prove the fixture does not rely on Cargo's process working directory.
         .current_dir(std::env::temp_dir())
         .output()
         .expect("mantis-cli should launch")
+}
+
+#[test]
+fn input_byte_limit_accepts_exact_boundary_and_rejects_one_more_byte() {
+    // Exercise the documented production limit through the real CLI process.
+    const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024;
+    let path = std::env::temp_dir().join(format!(
+        "mantis-cli-diff-byte-limit-{}.json",
+        std::process::id()
+    ));
+    let fixture = std::fs::read(example_chain()).unwrap();
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(&fixture).unwrap();
+    std::io::copy(
+        &mut std::io::repeat(b' ').take(MAX_INPUT_BYTES - fixture.len() as u64),
+        &mut file,
+    )
+    .unwrap();
+    drop(file);
+
+    for extra_args in [&[][..], &["--json"][..]] {
+        let expected = run_diff(extra_args);
+        assert!(expected.status.success());
+        let at_limit = run_diff_for_path(&path, extra_args);
+        assert!(
+            at_limit.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&at_limit.stderr)
+        );
+        assert_eq!(at_limit.stdout, expected.stdout);
+        assert_eq!(at_limit.stderr, expected.stderr);
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b" ").unwrap();
+    drop(file);
+    let oversized = run_diff_for_path(&path, &["--json"]);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(oversized.status.code(), Some(1));
+    assert!(oversized.stdout.is_empty());
+    let stderr = String::from_utf8(oversized.stderr).unwrap();
+    assert!(stderr.contains("diff input"), "{stderr}");
+    assert!(stderr.contains(path.to_string_lossy().as_ref()), "{stderr}");
+    assert!(stderr.contains("33554432-byte limit"), "{stderr}");
 }
 
 #[test]

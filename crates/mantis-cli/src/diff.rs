@@ -1,13 +1,18 @@
 //! `diff` subcommand: compare committed graph state and currently-derived
 //! geometry without making either snapshot part of the chain.
 
-use crate::{load_chain, CliError};
+use crate::CliError;
+use mantis_chain::Chain;
 use mantis_history::{
     compare_revisions, ChangeClassification, GeometryDiffStatus, HistoryDiff, RevisionGeometry,
 };
 use std::fmt::Write as _;
+use std::io::Read;
 
 const DIFF_USAGE: &str = "usage: mantis-cli diff FILE [--from N] [--to N] [--json]";
+/// Bound serialized CLI input before parsing, validation, replay, or evaluation.
+/// This does not bound the resources consumed by the derived geometry report.
+const MAX_DIFF_INPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EVALUATION_ERRORS_SHOWN: usize = 3;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -20,7 +25,7 @@ struct DiffArgs {
 
 pub(crate) fn cmd_diff(args: &[String]) -> Result<String, CliError> {
     let args = parse_args(args)?;
-    let chain = load_chain(&args.path)?;
+    let chain = load_diff_chain(&args.path)?;
     let head = chain
         .len()
         .checked_sub(1)
@@ -42,6 +47,36 @@ pub(crate) fn cmd_diff(args: &[String]) -> Result<String, CliError> {
     } else {
         Ok(format_human(&report))
     }
+}
+
+fn load_diff_chain(path: &str) -> Result<Chain, CliError> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| CliError::runtime(format!("cannot read {path}: {error}")))?;
+    read_diff_chain(file, path, MAX_DIFF_INPUT_BYTES)
+}
+
+fn read_diff_chain(reader: impl Read, path: &str, max_bytes: usize) -> Result<Chain, CliError> {
+    // Read one extra byte to distinguish an exact-boundary input from an
+    // oversized one. Bounding the read itself also handles files that grow
+    // after opening and inputs whose metadata does not report their size.
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| CliError::runtime(format!("cannot read {path}: {error}")))?;
+    if bytes.len() > max_bytes {
+        return Err(CliError::runtime(format!(
+            "diff input {path} exceeds the {max_bytes}-byte limit"
+        )));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| CliError::runtime(format!("cannot read {path}: {error}")))?;
+    Chain::from_json(text).map_err(|error| {
+        CliError::runtime(format!(
+            "invalid chain in {path}: [{}] {error}",
+            error.code()
+        ))
+    })
 }
 
 fn parse_args(args: &[String]) -> Result<DiffArgs, CliError> {
@@ -261,6 +296,86 @@ mod tests {
         let path = temp_chain_path();
         std::fs::write(&path, chain.to_json()).unwrap();
         path
+    }
+
+    #[test]
+    fn input_budget_accepts_exact_boundary_and_rejects_one_more_byte() {
+        let chain = Chain::new();
+        let mut json = chain.to_json();
+        let max_bytes = json.len();
+        assert_eq!(
+            read_diff_chain(json.as_bytes(), "chain.json", max_bytes).unwrap(),
+            chain
+        );
+
+        // Trailing whitespace keeps the oversized document otherwise valid.
+        json.push(' ');
+        assert_eq!(
+            read_diff_chain(json.as_bytes(), "chain.json", max_bytes),
+            Err(CliError::runtime(format!(
+                "diff input chain.json exceeds the {max_bytes}-byte limit"
+            )))
+        );
+    }
+
+    #[test]
+    fn oversized_input_stops_after_one_extra_byte_before_decoding() {
+        // Invalid UTF-8 must not hide the size error, and the unread suffix
+        // proves the loader does not consume the complete input first.
+        let mut reader = std::io::Cursor::new(vec![0xff; 32]);
+        assert_eq!(
+            read_diff_chain(&mut reader, "chain.json", 8),
+            Err(CliError::runtime(
+                "diff input chain.json exceeds the 8-byte limit"
+            ))
+        );
+        assert_eq!(reader.position(), 9);
+    }
+
+    #[test]
+    fn input_budget_preserves_read_and_parse_error_context() {
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied by test reader",
+                ))
+            }
+        }
+
+        assert_eq!(
+            read_diff_chain(FailingReader, "chain.json", 8),
+            Err(CliError::runtime(
+                "cannot read chain.json: denied by test reader"
+            ))
+        );
+        let utf8_error = read_diff_chain(&[0xff][..], "chain.json", 8).unwrap_err();
+        assert!(matches!(
+            utf8_error,
+            CliError::Runtime(message) if message.starts_with("cannot read chain.json:")
+                && message.contains("utf-8")
+        ));
+        let json_error = read_diff_chain(&b"{broken"[..], "chain.json", 8).unwrap_err();
+        assert!(matches!(
+            json_error,
+            CliError::Runtime(message) if message.starts_with("invalid chain in chain.json: [invalid_json]")
+        ));
+    }
+
+    #[test]
+    fn bounded_input_still_validates_signatures() {
+        let alice = Identity::generate("alice");
+        let bob = Identity::generate("bob");
+        let mut chain = crate::demo::build_demo_chain(&alice, &bob, 1000, 2000).unwrap();
+        chain.blocks[1].sig = "00".into();
+        let json = chain.to_json();
+        let error = read_diff_chain(json.as_bytes(), "chain.json", json.len()).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::Runtime(message) if message.starts_with("invalid chain in chain.json: [bad_signature]")
+        ));
     }
 
     #[test]

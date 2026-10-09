@@ -94,6 +94,10 @@ cargo test --locked --workspace
   분류하고 `incomplete`에는 실패 원인을 남깁니다.
 - `mantis-cli diff FILE [--from N] [--to N] [--json]`으로 사람용 요약과
   versioned JSON을 제공합니다.
+- CLI `diff` 입력은 공백을 포함해 최대 32 MiB (33,554,432바이트)로 제한합니다.
+  최대 한도+1바이트만 읽고, 초과하면 파싱·체인 검증·평가 전에 한도를 명시한
+  오류와 종료 코드 1을 반환하며 보고서를 출력하지 않습니다. 라이브러리 직접 호출에는
+  이 파일 입력 제한이 적용되지 않습니다.
 - library 단위 테스트, CLI 파서/출력 테스트, 체크인된 demo chain 통합
   테스트로 기존 리플레이와 CLI 동작을 회귀 검증합니다.
 
@@ -114,7 +118,7 @@ cargo test --locked --workspace
 | 체인에 evaluator version 미고정 | `engine_version`은 보고서 생성 바이너리의 package version일 뿐이며, 각 커밋이 사용한 레지스트리/커널을 재현하지 못함 | 아카이브 동치성이 아닌 현재 뷰로 판독하고 후속 버전 계약으로 분리 |
 | Preview-only 장면 | `__preview=false` 지오메트리와 비시각 출력의 변경은 형상 차이에 잡히지 않음 | 정의 순변화는 별도 보고하고 형상은 “visible preview”로 표기 |
 | 테셀레이션 fingerprint | 메시 정점 좌표·삼각형 인덱스의 정확 바이트 차이이며, B-rep 동치성·형상 공차·리메싱 동치를 증명하지 않음 | “changed”를 현재 테셀레이션 변경으로만 해석하고 요약 지표를 함께 제공 |
-| 자원 비용 | 두 revision을 전체 리플레이·평가하고 객체 보고서를 메모리에 구성하므로 큰 체인/리스트/메시에서 CPU·RAM·JSON 크기가 커짐 | 중첩 list 탐색 깊이를 8로 제한하고 초과를 완전성 진단에 기록; 검출된 차이가 없으면 `incomplete`, 전체 budget/cancellation은 후속 과제 |
+| 자원 비용 | 두 revision을 전체 리플레이·평가하고 객체 보고서를 메모리에 구성하므로 작은 입력도 큰 리스트/메시를 만들면 CPU·RAM·JSON 크기가 커짐 | CLI `diff` 입력을 32 MiB로 제한하고 초과 시 평가 전에 거부. 중첩 list 탐색 깊이를 8로 제한하고 초과를 완전성 진단에 기록; 검출된 차이가 없으면 `incomplete`. 노드·출력 객체·보고서 크기 예산과 cancellation은 후속 과제 |
 | 미지/실패 컴포넌트 | 현재 registry가 알지 못하는 노드, 평가 오류, 비유한 형상이 있으면 변화 부재를 보장할 수 없음 | 검출된 형상 차이는 보고하되, 서로 다른 net definition에서 차이가 없고 비완전하면 `incomplete`와 오류 상세를 반환 |
 
 ## 테스트 fixture와 mock
