@@ -69,7 +69,9 @@ deterministic tests in the owning crate and at least one boundary consumer.
 - `HistoryDiff` (history): validates the complete chain, treats revisions as
   block indices, preserves commits in `(from, to]`, and reports the net graph
   snapshot delta. It re-evaluates both graphs with `Registry::standard()` and
-  compares preview-enabled point/curve/mesh outputs. This geometry and its
+  compares preview-enabled point/curve/mesh outputs by default. The explicit
+  `all` geometry scope also includes hidden nodes; reports record `geometry.scope`
+  (missing scope in older reports means `preview`). This geometry and its
   fingerprints are derived evidence, not signed chain state. JSON reports carry
   `schema_version`; callers must handle `incomplete` rather than interpreting it
   as unchanged geometry.

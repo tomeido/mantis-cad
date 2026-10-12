@@ -27,7 +27,7 @@ chain JSON
   -> from/to 블록까지 각각 리플레이
   -> 두 Graph 스냅샷의 노드·연결·파라미터·레이아웃 순변화 산출
   -> Registry::standard() + Evaluator로 두 스냅샷 재평가
-  -> preview 점·곡선·메시 fingerprint/요약 비교
+  -> 선택 범위(preview 또는 all)의 점·곡선·메시 fingerprint/요약 비교
   -> 사람용 요약 또는 schema version 1 JSON
 ```
 
@@ -48,6 +48,10 @@ cargo run --locked -p mantis-cli -- \
 
 # 지정을 생략하면 head 직전 → head
 cargo run --locked -p mantis-cli -- diff examples/demo-chain.json
+
+# 숨긴 노드의 형상과 중간 출력까지 포함
+cargo run --locked -p mantis-cli -- \
+  diff examples/demo-chain.json --geometry-scope all --json
 
 # MVP 단위/경계 테스트
 cargo test --locked -p mantis-history
@@ -75,9 +79,12 @@ cargo test --locked --workspace
    파생 값이며, 가져온 CAD 원본·미리보기와 외부 B-rep 결과는 예외로
    노드 파라미터에 기록되어 커밋 후 서명 범위에 포함됩니다. 비교 보고서의
    형상 요약·면적·체적·fingerprint는 보고서를 만드는 시점의 파생 값입니다.
-4. 형상 범위는 GUI 뷰포트와 맞춘 `__preview=true` 노드의 `Vector`, `Curve`,
-   `Mesh` 출력입니다. 숨겨진 노드와 스칼라/텍스트/평면 출력은 형상 장면에
-   포함하지 않습니다.
+4. 기본 `preview` 범위는 GUI 뷰포트와 맞춘 미리보기 활성 노드의 `Vector`,
+   `Curve`, `Mesh` 출력입니다. `--geometry-scope all`은 `__preview=false`인
+   노드도 포함합니다. 두 범위 모두 리스트 안의 형상을 탐색하며 스칼라/텍스트/평면은
+   형상 객체로 세지 않습니다. `all`은 중간 출력도 별도 객체로 집계하므로 면적·체적
+   합계가 최종 솔리드의 합집합 측정값을 뜻하지 않습니다. 가져온 CAD도 기록된 데이터에서
+   평가하며 선택형 CAD backend를 다시 실행하지 않습니다.
 5. fingerprint는 동일 평가기 빌드 내에서 변경을 찾는 정확 비교입니다.
    형상 공차, 리메싱, 동일 형상의 다른 토폴로지를 동치로 처리하지 않습니다.
 
@@ -88,12 +95,15 @@ cargo test --locked --workspace
 - 체인 검증 후 두 명시적 committed revision을 리플레이합니다.
 - `(from, to]` 구간의 서명 커밋/`GraphOp`와 양 끝점의 그래프 순변화를 함께
   보고합니다.
-- preview 점·곡선·메시를 재평가해 객체 fingerprint, 개수, bounds, 곡선
+- 선택 범위의 점·곡선·메시를 재평가해 객체 fingerprint, 개수, bounds, 곡선
   길이, 메시 정점/삼각형, 면적, 부호 체적을 비교합니다.
 - `no_effect`, `layout_only`, `definition_only`, `geometry_changed`, `incomplete`로
   분류하고 `incomplete`에는 실패 원인을 남깁니다.
-- `mantis-cli diff FILE [--from N] [--to N] [--json]`으로 사람용 요약과
-  versioned JSON을 제공합니다.
+- `mantis-cli diff FILE [--from N] [--to N] [--geometry-scope preview|all] [--json]`으로
+  사람용 요약과 versioned JSON을 제공합니다. `geometry scope`/`geometry.scope`에
+  범위를 표시하며, scope 필드가 없는 기존 schema version 1 JSON은 `preview`입니다.
+  라이브러리 `compare_revisions`는 기존 preview 기본값을 유지하고
+  `compare_revisions_with_scope`로 범위를 선택합니다. 서명·동기화 형식은 유지합니다.
 - CLI `diff` 입력은 공백을 포함해 최대 32 MiB (33,554,432바이트)로 제한합니다.
   최대 한도+1바이트만 읽고, 초과하면 파싱·체인 검증·평가 전에 한도를 명시한
   오류와 종료 코드 1을 반환하며 보고서를 출력하지 않습니다. 라이브러리 직접 호출에는
@@ -116,10 +126,15 @@ cargo test --locked --workspace
 | Native 파일 직접 비교·완전 호환 부재 | 지원 외 컴포넌트, 전체 Data Tree, 외부 Rhino 형상 참조 등은 가져온 그래프로 복원되지 않음 | 지원되는 결과를 Mantis 체인에 커밋해 비교하고, 제외된 항목은 가져오기 진단과 `INTEROP.md`에서 확인 |
 | 현재 엔진으로 재평가 | 같은 체인이라도 컴포넌트/커널 구현이 바뀌면 과거에 보았던 형상과 다른 보고서가 나올 수 있음 | 결과에 `engine_version`을 남기고 파생 보고서임을 명시 |
 | 체인에 evaluator version 미고정 | `engine_version`은 보고서 생성 바이너리의 package version일 뿐이며, 각 커밋이 사용한 레지스트리/커널을 재현하지 못함 | 아카이브 동치성이 아닌 현재 뷰로 판독하고 후속 버전 계약으로 분리 |
-| Preview-only 장면 | `__preview=false` 지오메트리와 비시각 출력의 변경은 형상 차이에 잡히지 않음 | 정의 순변화는 별도 보고하고 형상은 “visible preview”로 표기 |
+| 형상 비교 범위 | 기본 `preview`는 `__preview=false` 형상을 제외하고, `all`도 스칼라/텍스트/평면은 형상 객체로 세지 않음 | 숨긴 형상은 `--geometry-scope all`로 비교하고 보고서에 범위 표시. 비형상 변경은 정의 순변화에서 확인 |
 | 테셀레이션 fingerprint | 메시 정점 좌표·삼각형 인덱스의 정확 바이트 차이이며, B-rep 동치성·형상 공차·리메싱 동치를 증명하지 않음 | “changed”를 현재 테셀레이션 변경으로만 해석하고 요약 지표를 함께 제공 |
 | 자원 비용 | 두 revision을 전체 리플레이·평가하고 객체 보고서를 메모리에 구성하므로 작은 입력도 큰 리스트/메시를 만들면 CPU·RAM·JSON 크기가 커짐 | CLI `diff` 입력을 32 MiB로 제한하고 초과 시 평가 전에 거부. 중첩 list 탐색 깊이를 8로 제한하고 초과를 완전성 진단에 기록; 검출된 차이가 없으면 `incomplete`. 노드·출력 객체·보고서 크기 예산과 cancellation은 후속 과제 |
 | 미지/실패 컴포넌트 | 현재 registry가 알지 못하는 노드, 평가 오류, 비유한 형상이 있으면 변화 부재를 보장할 수 없음 | 검출된 형상 차이는 보고하되, 서로 다른 net definition에서 차이가 없고 비완전하면 `incomplete`와 오류 상세를 반환 |
+
+형상 출력이 가능한 노드의 오류만 선택 범위의 완전성 진단에 포함합니다. 따라서 숨긴
+미지 컴포넌트의 실패는 `preview`에서 제외되고 `all`에서는 포함됩니다. 숨긴 상위 노드의
+오류가 미리보기 활성 하위 노드로 전파되면 `preview`에서도 진단하며, 스칼라 전용
+노드의 독립적인 실패는 두 범위 모두 형상의 완전성을 떨어뜨리지 않습니다.
 
 ## 테스트 fixture와 mock
 
@@ -139,8 +154,8 @@ timestamp는 재현 가능한 fixture이지 평가기 mock이 아닙니다.
    추가하고, 취소/timeout과 summary-only 모드를 정의해 대용량 입력을 제어합니다.
 3. 구현된 GHX·GH·3DM·STEP 가져오기의 fixture와 진단 회귀 검증을 확장하고,
    지원 외 컴포넌트·포트·데이터 구조의 처리 범위를 `INTEROP.md`와 함께 관리합니다.
-4. `--geometry-scope preview|all` 계약을 설계하고, hidden 노드·비시각 기하
-   출력의 포함 규칙과 completeness 표시를 테스트합니다.
+4. 구현된 `--geometry-scope preview|all`을 GUI·서버 diff 경로에 노출하고,
+   사용자 선택 범위와 완전성 진단을 함께 표시합니다.
 5. 메시에 공차 기반 정규화/거리 지표를 추가하고, 장기적으로 B-rep 또는
    위상 정보가 있는 형상 계약을 도입하기 위한 golden corpus와 동치성 정의를
    확정합니다.

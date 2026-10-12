@@ -37,6 +37,7 @@ USAGE:
                                                commit one GraphOp batch
   mantis-cli graph FILE [--upto N] [--json]    materialized graph + evaluation results
   mantis-cli diff FILE [--from N] [--to N] [--json]
+                    [--geometry-scope preview|all]
                                                compare committed definition + geometry
   mantis-cli audit FILE                         verified provenance + head checkpoint JSON
   mantis-cli inspect FILE                      list blocks (idx, author, ops, bytes)

@@ -4,12 +4,14 @@
 use crate::CliError;
 use mantis_chain::Chain;
 use mantis_history::{
-    compare_revisions, ChangeClassification, GeometryDiffStatus, HistoryDiff, RevisionGeometry,
+    compare_revisions_with_scope, ChangeClassification, GeometryDiffStatus, GeometryScope,
+    HistoryDiff, RevisionGeometry,
 };
 use std::fmt::Write as _;
 use std::io::Read;
 
-const DIFF_USAGE: &str = "usage: mantis-cli diff FILE [--from N] [--to N] [--json]";
+const DIFF_USAGE: &str =
+    "usage: mantis-cli diff FILE [--from N] [--to N] [--geometry-scope preview|all] [--json]";
 /// Bound serialized CLI input before parsing, validation, replay, or evaluation.
 /// This does not bound the resources consumed by the derived geometry report.
 const MAX_DIFF_INPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -20,6 +22,7 @@ struct DiffArgs {
     path: String,
     from: Option<usize>,
     to: Option<usize>,
+    geometry_scope: GeometryScope,
     json: bool,
 }
 
@@ -35,7 +38,7 @@ pub(crate) fn cmd_diff(args: &[String]) -> Result<String, CliError> {
 
     // Range and ordering checks deliberately live in mantis-history so every
     // caller gets the same non-clamping behavior and diagnostic.
-    let report = compare_revisions(&chain, from, to)
+    let report = compare_revisions_with_scope(&chain, from, to, args.geometry_scope)
         .map_err(|error| CliError::runtime(format!("cannot compare revisions: {error}")))?;
 
     if args.json {
@@ -86,6 +89,22 @@ fn parse_args(args: &[String]) -> Result<DiffArgs, CliError> {
         match arg.as_str() {
             "--from" => parsed.from = Some(parse_revision("--from", it.next())?),
             "--to" => parsed.to = Some(parse_revision("--to", it.next())?),
+            "--geometry-scope" => {
+                parsed.geometry_scope = match it.next().map(String::as_str) {
+                    Some("preview") => GeometryScope::Preview,
+                    Some("all") => GeometryScope::All,
+                    Some(value) => {
+                        return Err(CliError::usage(format!(
+                            "invalid --geometry-scope: {value}; expected preview or all"
+                        )))
+                    }
+                    None => {
+                        return Err(CliError::usage(
+                            "--geometry-scope needs a value: preview or all",
+                        ))
+                    }
+                };
+            }
             "--json" => parsed.json = true,
             other if parsed.path.is_empty() && !other.starts_with("--") => {
                 parsed.path = other.to_string();
@@ -152,6 +171,15 @@ fn format_human(report: &HistoryDiff) -> String {
         output,
         "classification: {}",
         classification_name(report.classification)
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(
+        output,
+        "geometry scope: {}",
+        match report.geometry.scope {
+            GeometryScope::Preview => "preview",
+            GeometryScope::All => "all",
+        }
     )
     .expect("writing to a String cannot fail");
     writeln!(
@@ -272,6 +300,7 @@ mod tests {
     use super::*;
     use mantis_chain::Identity;
     use mantis_graph::{GraphOp, NodeId, ParamValue};
+    use mantis_history::compare_revisions;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -387,6 +416,8 @@ mod tests {
             "chain.json",
             "--from",
             "2",
+            "--geometry-scope",
+            "all",
         ]))
         .unwrap();
         assert_eq!(
@@ -395,6 +426,7 @@ mod tests {
                 path: "chain.json".into(),
                 from: Some(2),
                 to: Some(4),
+                geometry_scope: GeometryScope::All,
                 json: true,
             }
         );

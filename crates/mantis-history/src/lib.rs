@@ -287,6 +287,24 @@ pub struct GeometryObjectChange {
     pub after: GeometryObject,
 }
 
+/// Which nodes contribute drawable outputs and geometry evaluation errors.
+/// Both scopes exclude scalar, text, and plane outputs.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeometryScope {
+    /// Match the viewport by including only preview-enabled nodes.
+    #[default]
+    Preview,
+    /// Include drawable outputs from all nodes, including hidden nodes.
+    All,
+}
+
+impl GeometryScope {
+    fn includes(self, node: &Node) -> bool {
+        self == Self::All || node.preview()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GeometryDiffStatus {
@@ -299,7 +317,10 @@ pub enum GeometryDiffStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeometryDiff {
-    /// Visible-scene result. A changed fingerprint is reported as `Changed`
+    /// Missing in older reports, which always compared preview geometry.
+    #[serde(default)]
+    pub scope: GeometryScope,
+    /// Result for the selected scope. A changed fingerprint is reported as `Changed`
     /// even if one side is incomplete; inspect `before/after.is_complete()`
     /// to determine whether the reported object sets are exhaustive.
     pub status: GeometryDiffStatus,
@@ -342,6 +363,17 @@ pub fn compare_revisions(
     from: usize,
     to: usize,
 ) -> Result<HistoryDiff, CompareError> {
+    compare_revisions_with_scope(chain, from, to, GeometryScope::Preview)
+}
+
+/// Compare committed definitions and currently-derived geometry in the selected
+/// scope. The chain and its signed wire format are never modified.
+pub fn compare_revisions_with_scope(
+    chain: &Chain,
+    from: usize,
+    to: usize,
+    scope: GeometryScope,
+) -> Result<HistoryDiff, CompareError> {
     chain.validate()?;
     let head = chain.len().checked_sub(1).ok_or(ChainError::Empty)?;
     if from > head {
@@ -363,7 +395,7 @@ pub fn compare_revisions(
     let before_graph = chain.replay(Some(from))?;
     let after_graph = chain.replay(Some(to))?;
     let definition = diff_graphs(&before_graph, &after_graph);
-    let geometry = diff_geometry(&before_graph, &after_graph, definition.is_empty());
+    let geometry = diff_geometry(&before_graph, &after_graph, definition.is_empty(), scope);
     let classification = classify(&definition, &geometry);
     let commits = chain
         .blocks
@@ -500,9 +532,14 @@ fn diff_graphs(before: &Graph, after: &Graph) -> DefinitionDiff {
     }
 }
 
-fn diff_geometry(before: &Graph, after: &Graph, definitions_match: bool) -> GeometryDiff {
-    let before = evaluate_geometry(before);
-    let after = evaluate_geometry(after);
+fn diff_geometry(
+    before: &Graph,
+    after: &Graph,
+    definitions_match: bool,
+    scope: GeometryScope,
+) -> GeometryDiff {
+    let before = evaluate_geometry(before, scope);
+    let after = evaluate_geometry(after, scope);
     let before_by_id: BTreeMap<_, _> = before
         .objects
         .iter()
@@ -553,6 +590,7 @@ fn diff_geometry(before: &Graph, after: &Graph, definitions_match: bool) -> Geom
     };
 
     GeometryDiff {
+        scope,
         status,
         before,
         after,
@@ -562,18 +600,18 @@ fn diff_geometry(before: &Graph, after: &Graph, definitions_match: bool) -> Geom
     }
 }
 
-fn evaluate_geometry(graph: &Graph) -> RevisionGeometry {
+fn evaluate_geometry(graph: &Graph, scope: GeometryScope) -> RevisionGeometry {
     let registry = Registry::standard();
     let output = Evaluator::new().evaluate(graph, &registry);
     let evaluation_errors = output
         .errors
         .iter()
-        // Geometry comparison follows the viewport: hidden nodes do not make
-        // the visible scene incomplete. A hidden upstream failure still
-        // propagates to any preview-enabled downstream node and is retained.
+        // Errors follow the same scope as drawable outputs. In preview scope,
+        // a hidden upstream failure still propagates to a visible downstream
+        // node and is retained there.
         .filter(|(id, _)| {
             graph.nodes.get(id).is_some_and(|node| {
-                node.preview() && component_may_output_geometry(node, &registry)
+                scope.includes(node) && component_may_output_geometry(node, &registry)
             })
         })
         .map(|(id, message)| EvaluationError {
@@ -589,7 +627,7 @@ fn evaluate_geometry(graph: &Graph) -> RevisionGeometry {
     let mut objects = Vec::new();
     let mut truncated_list_count = 0;
     for (id, node) in &graph.nodes {
-        if !node.preview() {
+        if !scope.includes(node) {
             continue;
         }
         let Some(values) = output.outputs.get(id) else {
@@ -1050,6 +1088,87 @@ mod tests {
     }
 
     #[test]
+    fn hidden_mesh_changes_are_reported_only_in_all_scope() {
+        let mut chain = sample_chain();
+        chain
+            .append(
+                vec![GraphOp::SetParam {
+                    id: node(2),
+                    key: "__preview".into(),
+                    value: ParamValue::Bool(false),
+                }],
+                "hide box",
+                &identity(),
+                4,
+            )
+            .unwrap();
+        chain
+            .append(
+                vec![GraphOp::SetParam {
+                    id: node(1),
+                    key: "value".into(),
+                    value: ParamValue::Number(3.0),
+                }],
+                "resize hidden box",
+                &identity(),
+                5,
+            )
+            .unwrap();
+        let original_chain = chain.to_json();
+        let preview = compare_revisions(&chain, 4, 5).unwrap();
+        assert_eq!(preview.geometry.scope, GeometryScope::Preview);
+        assert_eq!(
+            preview,
+            compare_revisions_with_scope(&chain, 4, 5, GeometryScope::Preview).unwrap()
+        );
+        assert_eq!(preview.geometry.status, GeometryDiffStatus::Unchanged);
+        assert_eq!(preview.classification, ChangeClassification::DefinitionOnly);
+        assert_eq!(preview.geometry.before.summary.object_count, 0);
+        assert_eq!(preview.geometry.after.summary.object_count, 0);
+
+        let all = compare_revisions_with_scope(&chain, 4, 5, GeometryScope::All).unwrap();
+        assert_eq!(all.geometry.scope, GeometryScope::All);
+        assert_eq!(all.geometry.status, GeometryDiffStatus::Changed);
+        assert_eq!(all.classification, ChangeClassification::GeometryChanged);
+        assert_eq!(all.geometry.modified_objects.len(), 1);
+        assert_eq!(all.geometry.modified_objects[0].before.id.node_id, node(2));
+        assert_eq!(all.geometry.before.summary.mesh_count, 1);
+        assert_eq!(all.geometry.after.summary.mesh_count, 1);
+        assert!(all.geometry.before.is_complete());
+        assert!(all.geometry.after.is_complete());
+        assert_approx(all.geometry.before.summary.mesh_signed_volume, 2.0);
+        assert_approx(all.geometry.after.summary.mesh_signed_volume, 3.0);
+        let json = serde_json::to_string(&all).unwrap();
+        assert_eq!(
+            json,
+            serde_json::to_string(
+                &compare_revisions_with_scope(&chain, 4, 5, GeometryScope::All).unwrap()
+            )
+            .unwrap()
+        );
+        let decoded: HistoryDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.geometry.scope, GeometryScope::All);
+        assert_eq!(decoded.geometry.status, all.geometry.status);
+        assert_eq!(
+            decoded.geometry.after.summary.scene_fingerprint,
+            all.geometry.after.summary.scene_fingerprint
+        );
+        assert_eq!(
+            serde_json::to_value(&all).unwrap()["geometry"]["scope"],
+            "all"
+        );
+        assert_eq!(chain.to_json(), original_chain);
+
+        let hidden = compare_revisions(&chain, 3, 4).unwrap();
+        assert_eq!(hidden.geometry.status, GeometryDiffStatus::Changed);
+        assert_eq!(hidden.geometry.removed_objects.len(), 1);
+        let all = compare_revisions_with_scope(&chain, 3, 4, GeometryScope::All).unwrap();
+        assert_eq!(all.geometry.status, GeometryDiffStatus::Unchanged);
+        assert_eq!(all.geometry.before, all.geometry.after);
+        assert_eq!(all.classification, ChangeClassification::DefinitionOnly);
+    }
+
+    #[test]
     fn genesis_to_first_commit_includes_net_graph_and_raw_history() {
         let report = compare_revisions(&sample_chain(), 0, 1).unwrap();
         assert_eq!(report.definition.added_nodes.len(), 2);
@@ -1137,6 +1256,13 @@ mod tests {
         assert_eq!(report.geometry.status, GeometryDiffStatus::Unchanged);
         assert!(report.geometry.after.is_complete());
         assert!(report.geometry.after.evaluation_errors.is_empty());
+
+        let all = compare_revisions_with_scope(&chain, 3, 4, GeometryScope::All).unwrap();
+        assert_eq!(all.geometry.status, GeometryDiffStatus::Incomplete);
+        assert_eq!(all.classification, ChangeClassification::Incomplete);
+        assert!(!all.geometry.after.is_complete());
+        assert_eq!(all.geometry.after.evaluation_errors.len(), 1);
+        assert_eq!(all.geometry.after.evaluation_errors[0].node_id, node(9));
     }
 
     #[test]
@@ -1154,10 +1280,12 @@ mod tests {
                 4,
             )
             .unwrap();
-        let report = compare_revisions(&chain, 3, 4).unwrap();
-        assert_eq!(report.geometry.status, GeometryDiffStatus::Unchanged);
-        assert!(report.geometry.after.is_complete());
-        assert_eq!(report.classification, ChangeClassification::DefinitionOnly);
+        for scope in [GeometryScope::Preview, GeometryScope::All] {
+            let report = compare_revisions_with_scope(&chain, 3, 4, scope).unwrap();
+            assert_eq!(report.geometry.status, GeometryDiffStatus::Unchanged);
+            assert!(report.geometry.after.is_complete());
+            assert_eq!(report.classification, ChangeClassification::DefinitionOnly);
+        }
     }
 
     #[test]
@@ -1246,7 +1374,12 @@ mod tests {
 
         let definition = diff_graphs(&before, &after);
         assert!(definition.is_empty());
-        let geometry = diff_geometry(&before, &after, definition.is_empty());
+        let geometry = diff_geometry(
+            &before,
+            &after,
+            definition.is_empty(),
+            GeometryScope::Preview,
+        );
         assert_eq!(geometry.status, GeometryDiffStatus::Unchanged);
     }
 
@@ -1258,9 +1391,21 @@ mod tests {
         assert_eq!(value["engine_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(value["classification"], "geometry_changed");
         assert_eq!(value["geometry"]["status"], "changed");
+        assert_eq!(value["geometry"]["scope"], "preview");
         assert_eq!(
             value["geometry"]["modified_objects"][0]["before"]["details"]["kind"],
             "mesh"
+        );
+    }
+
+    #[test]
+    fn older_reports_without_scope_deserialize_as_preview() {
+        let report = compare_revisions(&sample_chain(), 1, 2).unwrap();
+        let mut value = serde_json::to_value(&report).unwrap();
+        value["geometry"].as_object_mut().unwrap().remove("scope");
+        assert_eq!(
+            serde_json::from_value::<HistoryDiff>(value).unwrap(),
+            report
         );
     }
 }

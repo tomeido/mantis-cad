@@ -1,3 +1,5 @@
+use mantis_chain::{Chain, Identity};
+use mantis_graph::{GraphOp, NodeId, ParamValue};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -22,6 +24,79 @@ fn run_diff_for_path(path: &Path, extra_args: &[&str]) -> Output {
         .current_dir(std::env::temp_dir())
         .output()
         .expect("mantis-cli should launch")
+}
+
+struct HiddenMeshFixture {
+    path: PathBuf,
+}
+
+impl HiddenMeshFixture {
+    fn new() -> Self {
+        let author = Identity::generate("hidden-mesh-test");
+        let mut chain = Chain::new();
+        chain
+            .append(
+                vec![
+                    GraphOp::AddNode {
+                        id: NodeId(1),
+                        type_name: "number_slider".into(),
+                        pos: (0.0, 0.0),
+                    },
+                    GraphOp::SetParam {
+                        id: NodeId(1),
+                        key: "value".into(),
+                        value: ParamValue::Number(1.0),
+                    },
+                    GraphOp::AddNode {
+                        id: NodeId(2),
+                        type_name: "box_mesh".into(),
+                        pos: (100.0, 0.0),
+                    },
+                    GraphOp::SetParam {
+                        id: NodeId(2),
+                        key: "__preview".into(),
+                        value: ParamValue::Bool(false),
+                    },
+                    GraphOp::Connect {
+                        from: (NodeId(1), 0),
+                        to: (NodeId(2), 1),
+                    },
+                ],
+                "hidden unit box",
+                &author,
+                1,
+            )
+            .unwrap();
+        chain
+            .append(
+                vec![GraphOp::SetParam {
+                    id: NodeId(1),
+                    key: "value".into(),
+                    value: ParamValue::Number(2.0),
+                }],
+                "double hidden box width",
+                &author,
+                2,
+            )
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "mantis-cli-diff-hidden-mesh-{}.json",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(chain.to_json().as_bytes()).unwrap();
+        Self { path }
+    }
+}
+
+impl Drop for HiddenMeshFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[test]
@@ -87,6 +162,7 @@ fn demo_revisions_one_to_two_have_human_summary() {
         "{stdout}"
     );
     assert!(stdout.contains("geometry (changed):"), "{stdout}");
+    assert!(stdout.contains("geometry scope: preview"), "{stdout}");
     assert!(stdout.contains("object changes:"), "{stdout}");
 }
 
@@ -105,6 +181,117 @@ fn demo_revisions_one_to_two_serialize_the_history_report() {
     assert_eq!(report["commits"].as_array().unwrap().len(), 1);
     assert_eq!(report["classification"], "geometry_changed");
     assert_eq!(report["geometry"]["status"], "changed");
+    assert_eq!(report["geometry"]["scope"], "preview");
+}
+
+#[test]
+fn default_and_explicit_preview_scope_have_identical_output() {
+    for extra_args in [&[][..], &["--json"][..]] {
+        let default = run_diff(extra_args);
+        let mut preview_args = extra_args.to_vec();
+        preview_args.extend(["--geometry-scope", "preview"]);
+        let preview = run_diff(&preview_args);
+        assert!(
+            default.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&default.stderr)
+        );
+        assert!(
+            preview.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        assert_eq!(default.stdout, preview.stdout);
+        assert_eq!(default.stderr, preview.stderr);
+    }
+}
+
+#[test]
+fn all_scope_detects_hidden_mesh_changes_without_mutating_signed_input() {
+    let fixture = HiddenMeshFixture::new();
+    let before = std::fs::read(&fixture.path).unwrap();
+    let signed_chain = Chain::from_json(std::str::from_utf8(&before).unwrap()).unwrap();
+
+    for (scope_args, expected_scope, classification, status, object_count, modified_count) in [
+        (&[][..], "preview", "definition_only", "unchanged", 0, 0),
+        (
+            &["--geometry-scope", "preview"][..],
+            "preview",
+            "definition_only",
+            "unchanged",
+            0,
+            0,
+        ),
+        (
+            &["--geometry-scope", "all"][..],
+            "all",
+            "geometry_changed",
+            "changed",
+            1,
+            1,
+        ),
+    ] {
+        let mut args = scope_args.to_vec();
+        args.push("--json");
+        let output = run_diff_for_path(&fixture.path, &args);
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["geometry"]["scope"], expected_scope);
+        assert_eq!(report["classification"], classification);
+        assert_eq!(report["geometry"]["status"], status);
+        for revision in ["before", "after"] {
+            assert_eq!(
+                report["geometry"][revision]["summary"]["object_count"],
+                object_count
+            );
+        }
+        assert_eq!(
+            report["geometry"]["modified_objects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            modified_count
+        );
+    }
+
+    let output = run_diff_for_path(&fixture.path, &["--geometry-scope", "all"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("geometry scope: all"), "{stdout}");
+    assert!(
+        stdout.contains("classification: geometry_changed"),
+        "{stdout}"
+    );
+
+    let after = std::fs::read(&fixture.path).unwrap();
+    assert_eq!(after, before, "diff must not rewrite signed chain input");
+    assert_eq!(
+        Chain::from_json(std::str::from_utf8(&after).unwrap()).unwrap(),
+        signed_chain
+    );
+}
+
+#[test]
+fn invalid_or_missing_geometry_scope_is_a_usage_error() {
+    for args in [
+        &["--geometry-scope"][..],
+        &["--geometry-scope", "hidden"][..],
+        &["--geometry-scope", "--json"][..],
+    ] {
+        let output = run_diff(args);
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert!(output.stdout.is_empty(), "args: {args:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("--geometry-scope"), "{stderr}");
+    }
 }
 
 #[test]
