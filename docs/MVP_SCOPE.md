@@ -104,6 +104,20 @@ cargo test --locked --workspace
   범위를 표시하며, scope 필드가 없는 기존 schema version 1 JSON은 `preview`입니다.
   라이브러리 `compare_revisions`는 기존 preview 기본값을 유지하고
   `compare_revisions_with_scope`로 범위를 선택합니다. 서명·동기화 형식은 유지합니다.
+- 파생 보고서에 `engine_version`과 `evaluator_provenance`를 기록합니다.
+  `registry_contract_hash`는 `mantis-registry-contract-v1` 도메인의 SHA-256입니다.
+  이름순 컴포넌트 ID, 순서 있는 입력/출력 포트의 이름·종류·접근 방식·기본값 유무와
+  값을 포함하며 UI label/category는 제외합니다. 명시적 variant tag와 고정 폭
+  little-endian 길이/수치 인코딩을 사용하고 기본값의 부동소수점 비트(±0 포함),
+  리스트와 형상 데이터(메시 normal 포함)를 보존합니다.
+  `build_id`는 컴파일 시 `MANTIS_GIT_SHA`의 앞뒤 공백을 제거한 값이며, 없거나
+  비어 있으면 `unknown`입니다. 릴리스 파이프라인은 해당 값에 Git revision을 넣습니다.
+  로컬 빌드도 `MANTIS_GIT_SHA=<revision> cargo build --locked -p mantis-cli`로 지정할 수
+  있으며 실행 시 환경변수로는 바뀌지 않습니다. 이 값은 빌드자가 제공하는 표식으로,
+  수정된 소스·컴파일 옵션·의존성까지 보증하는 바이너리 해시는 아닙니다.
+  계약 해시 역시 평가 함수·커널 코드·노드 파라미터의 의미를 포함하지 않습니다.
+  기존 schema version 1 보고서에서 provenance가 없으면 미상(`None`)으로 읽고
+  현재 평가기 정보를 소급해 채우지 않습니다. 이 추가는 서명 체인/manifest를 변경하지 않습니다.
 - CLI `diff` 입력은 공백을 포함해 최대 32 MiB (33,554,432바이트)로 제한합니다.
   최대 한도+1바이트만 읽고, 초과하면 파싱·체인 검증·평가 전에 한도를 명시한
   오류와 종료 코드 1을 반환하며 보고서를 출력하지 않습니다. 라이브러리 직접 호출에는
@@ -124,8 +138,8 @@ cargo test --locked --workspace
 | 항목 | 영향 | MVP 대응 |
 |---|---|---|
 | Native 파일 직접 비교·완전 호환 부재 | 지원 외 컴포넌트, 전체 Data Tree, 외부 Rhino 형상 참조 등은 가져온 그래프로 복원되지 않음 | 지원되는 결과를 Mantis 체인에 커밋해 비교하고, 제외된 항목은 가져오기 진단과 `INTEROP.md`에서 확인 |
-| 현재 엔진으로 재평가 | 같은 체인이라도 컴포넌트/커널 구현이 바뀌면 과거에 보았던 형상과 다른 보고서가 나올 수 있음 | 결과에 `engine_version`을 남기고 파생 보고서임을 명시 |
-| 체인에 evaluator version 미고정 | `engine_version`은 보고서 생성 바이너리의 package version일 뿐이며, 각 커밋이 사용한 레지스트리/커널을 재현하지 못함 | 아카이브 동치성이 아닌 현재 뷰로 판독하고 후속 버전 계약으로 분리 |
+| 현재 엔진으로 재평가 | 같은 체인이라도 컴포넌트/커널 구현이 바뀌면 과거에 보았던 형상과 다른 보고서가 나올 수 있음 | `engine_version`, registry 계약 해시, build ID로 보고서를 생성한 평가기 정보를 표시 |
+| 체인에 evaluator version 미고정 | 보고서의 provenance는 현재 평가기의 선언된 포트 계약과 빌드 표식이며, 각 커밋이 사용한 레지스트리/커널을 재현하지 못함. build ID가 `unknown`이면 빌드 출처도 미상 | 아카이브 동치성이 아닌 현재 뷰로 판독. 서명 형식에 evaluator를 고정하는 작업은 별도 version migration으로 분리 |
 | 형상 비교 범위 | 기본 `preview`는 `__preview=false` 형상을 제외하고, `all`도 스칼라/텍스트/평면은 형상 객체로 세지 않음 | 숨긴 형상은 `--geometry-scope all`로 비교하고 보고서에 범위 표시. 비형상 변경은 정의 순변화에서 확인 |
 | 테셀레이션 fingerprint | 메시 정점 좌표·삼각형 인덱스의 정확 바이트 차이이며, B-rep 동치성·형상 공차·리메싱 동치를 증명하지 않음 | “changed”를 현재 테셀레이션 변경으로만 해석하고 요약 지표를 함께 제공 |
 | 자원 비용 | 두 revision을 전체 리플레이·평가하고 객체 보고서를 메모리에 구성하므로 작은 입력도 큰 리스트/메시를 만들면 CPU·RAM·JSON 크기가 커짐 | CLI `diff` 입력을 32 MiB로 제한하고 초과 시 평가 전에 거부. 중첩 list 탐색 깊이를 8로 제한하고 초과를 완전성 진단에 기록; 검출된 차이가 없으면 `incomplete`. 노드·출력 객체·보고서 크기 예산과 cancellation은 후속 과제 |
@@ -138,18 +152,20 @@ cargo test --locked --workspace
 
 ## 테스트 fixture와 mock
 
-**임시 mock은 없습니다.** `mantis-history` 단위 테스트는 실제 `Chain::append`로
+형상 비교 테스트에 임시 evaluator mock은 없습니다. `mantis-history` 단위 테스트는 실제 `Chain::append`로
 서명된 체인을 만들고 실제 `Registry::standard()`/`Evaluator`로 box mesh, layout-only,
 실패 컴포넌트 케이스를 평가합니다. CLI 경계 테스트는 실제 demo builder와
 체크인된 [`examples/demo-chain.json`](../examples/demo-chain.json)을 사용하며, 프로세스를
 실제로 실행해 사람용/JSON 출력과 실패 exit code를 확인합니다. 고정 identity와
 timestamp는 재현 가능한 fixture이지 평가기 mock이 아닙니다.
+registry 계약 해시 테스트는 테스트용 포트 선언 fixture로 등록 순서의 독립성,
+계약 변경 감지, 정확한 기본값 인코딩을 확인하며 해당 fixture의 평가 함수는 호출하지 않습니다.
 
 ## 다음 작업 5개
 
-1. 체인/manifest에 컴포넌트 registry schema hash, kernel/evaluator 버전, build
-   provenance를 고정하고 비호환 revision의 재평가를 거부하거나 명시적
-   compatibility mode로 실행합니다.
+1. 구현된 파생 보고서 provenance를 바탕으로, 별도 version migration에서 체인/manifest에
+   컴포넌트 registry 계약 hash, kernel/evaluator 버전, build provenance를 고정하고
+   비호환 revision의 재평가를 거부하거나 명시적 compatibility mode로 실행합니다.
 2. `diff`에 연산·노드·출력 객체·리스트 항목·보고서 바이트 budget을
    추가하고, 취소/timeout과 summary-only 모드를 정의해 대용량 입력을 제어합니다.
 3. 구현된 GHX·GH·3DM·STEP 가져오기의 fixture와 진단 회귀 검증을 확장하고,

@@ -185,6 +185,39 @@ fn demo_revisions_one_to_two_serialize_the_history_report() {
 }
 
 #[test]
+fn evaluator_provenance_is_stable_and_visible_without_rewriting_the_chain() {
+    let path = example_chain();
+    let before = std::fs::read(&path).unwrap();
+    let output = run_diff(&["--from", "1", "--to", "2", "--json"]);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let provenance = &report["evaluator_provenance"];
+    let hash = provenance["registry_contract_hash"].as_str().unwrap();
+    assert_eq!(hash.len(), 64);
+    assert!(hash
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    let build_id = option_env!("MANTIS_GIT_SHA")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    assert_eq!(provenance["build_id"], build_id);
+
+    let repeated = run_diff(&["--from", "1", "--to", "2", "--json"]);
+    assert!(repeated.status.success());
+    assert_eq!(output.stdout, repeated.stdout);
+    let human = run_diff(&["--from", "1", "--to", "2"]);
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains(&format!(
+        "evaluator: {}; build {build_id:?}",
+        env!("CARGO_PKG_VERSION")
+    )));
+    assert!(human.contains(&format!("registry contract: sha256:{hash}")));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
 fn default_and_explicit_preview_scope_have_identical_output() {
     for extra_args in [&[][..], &["--json"][..]] {
         let default = run_diff(extra_args);

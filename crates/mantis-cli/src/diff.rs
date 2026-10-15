@@ -150,6 +150,21 @@ fn format_human(report: &HistoryDiff) -> String {
         report.to.message
     )
     .expect("writing to a String cannot fail");
+    if let Some(provenance) = &report.evaluator_provenance {
+        writeln!(
+            output,
+            "evaluator: {}; build {:?}\nregistry contract: sha256:{}",
+            report.engine_version, provenance.build_id, provenance.registry_contract_hash
+        )
+        .expect("writing to a String cannot fail");
+    } else {
+        writeln!(
+            output,
+            "evaluator: {}; provenance unavailable",
+            report.engine_version
+        )
+        .expect("writing to a String cannot fail");
+    }
     writeln!(
         output,
         "commits: {}, operations: {}",

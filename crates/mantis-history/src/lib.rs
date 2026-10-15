@@ -14,6 +14,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+mod provenance;
+pub use provenance::EvaluatorProvenance;
+
 /// Version of the machine-readable comparison report.
 pub const HISTORY_DIFF_SCHEMA_VERSION: u32 = 1;
 
@@ -346,6 +349,9 @@ pub struct HistoryDiff {
     pub schema_version: u32,
     /// Version of the Mantis evaluator/kernel used to derive both snapshots.
     pub engine_version: String,
+    /// Current evaluator provenance; absent in older reports, hence unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator_provenance: Option<EvaluatorProvenance>,
     pub from: RevisionRef,
     pub to: RevisionRef,
     /// Every signed commit in `(from, to]`, including operations that have no
@@ -395,7 +401,15 @@ pub fn compare_revisions_with_scope(
     let before_graph = chain.replay(Some(from))?;
     let after_graph = chain.replay(Some(to))?;
     let definition = diff_graphs(&before_graph, &after_graph);
-    let geometry = diff_geometry(&before_graph, &after_graph, definition.is_empty(), scope);
+    let registry = Registry::standard();
+    let evaluator_provenance = EvaluatorProvenance::for_registry(&registry);
+    let geometry = diff_geometry(
+        &before_graph,
+        &after_graph,
+        definition.is_empty(),
+        scope,
+        &registry,
+    );
     let classification = classify(&definition, &geometry);
     let commits = chain
         .blocks
@@ -412,6 +426,7 @@ pub fn compare_revisions_with_scope(
     Ok(HistoryDiff {
         schema_version: HISTORY_DIFF_SCHEMA_VERSION,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        evaluator_provenance: Some(evaluator_provenance),
         from: revision_ref(&chain.blocks[from], from),
         to: revision_ref(&chain.blocks[to], to),
         commits,
@@ -537,9 +552,10 @@ fn diff_geometry(
     after: &Graph,
     definitions_match: bool,
     scope: GeometryScope,
+    registry: &Registry,
 ) -> GeometryDiff {
-    let before = evaluate_geometry(before, scope);
-    let after = evaluate_geometry(after, scope);
+    let before = evaluate_geometry(before, scope, registry);
+    let after = evaluate_geometry(after, scope, registry);
     let before_by_id: BTreeMap<_, _> = before
         .objects
         .iter()
@@ -600,9 +616,8 @@ fn diff_geometry(
     }
 }
 
-fn evaluate_geometry(graph: &Graph, scope: GeometryScope) -> RevisionGeometry {
-    let registry = Registry::standard();
-    let output = Evaluator::new().evaluate(graph, &registry);
+fn evaluate_geometry(graph: &Graph, scope: GeometryScope, registry: &Registry) -> RevisionGeometry {
+    let output = Evaluator::new().evaluate(graph, registry);
     let evaluation_errors = output
         .errors
         .iter()
@@ -611,7 +626,7 @@ fn evaluate_geometry(graph: &Graph, scope: GeometryScope) -> RevisionGeometry {
         // node and is retained there.
         .filter(|(id, _)| {
             graph.nodes.get(id).is_some_and(|node| {
-                scope.includes(node) && component_may_output_geometry(node, &registry)
+                scope.includes(node) && component_may_output_geometry(node, registry)
             })
         })
         .map(|(id, message)| EvaluationError {
@@ -1379,6 +1394,7 @@ mod tests {
             &after,
             definition.is_empty(),
             GeometryScope::Preview,
+            &Registry::standard(),
         );
         assert_eq!(geometry.status, GeometryDiffStatus::Unchanged);
     }
@@ -1389,6 +1405,15 @@ mod tests {
         let value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["engine_version"], env!("CARGO_PKG_VERSION"));
+        let provenance = EvaluatorProvenance::for_registry(&Registry::standard());
+        assert_eq!(
+            value["evaluator_provenance"]["build_id"],
+            provenance.build_id
+        );
+        assert_eq!(
+            value["evaluator_provenance"]["registry_contract_hash"],
+            provenance.registry_contract_hash
+        );
         assert_eq!(value["classification"], "geometry_changed");
         assert_eq!(value["geometry"]["status"], "changed");
         assert_eq!(value["geometry"]["scope"], "preview");
@@ -1407,5 +1432,31 @@ mod tests {
             serde_json::from_value::<HistoryDiff>(value).unwrap(),
             report
         );
+    }
+
+    #[test]
+    fn older_reports_without_provenance_remain_unknown() {
+        let report = compare_revisions(&sample_chain(), 1, 2).unwrap();
+        let mut value = serde_json::to_value(&report).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("evaluator_provenance");
+        let older = serde_json::from_value::<HistoryDiff>(value.clone()).unwrap();
+        assert!(older.evaluator_provenance.is_none());
+        assert_eq!(serde_json::to_value(older).unwrap(), value);
+    }
+
+    #[test]
+    fn generating_provenance_preserves_signed_chain_and_report_determinism() {
+        let chain = sample_chain();
+        let before = chain.to_json();
+        let report = compare_revisions(&chain, 1, 2).unwrap();
+        assert!(report.evaluator_provenance.is_some());
+        assert_eq!(report, compare_revisions(&chain, 1, 2).unwrap());
+        assert_eq!(before, chain.to_json());
+        assert_eq!(report.from.hash, chain.blocks[1].hash);
+        assert_eq!(report.to.hash, chain.blocks[2].hash);
+        chain.validate().unwrap();
     }
 }
