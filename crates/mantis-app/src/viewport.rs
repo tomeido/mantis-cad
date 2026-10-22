@@ -221,7 +221,7 @@ pub fn pick_scene(
     let project = |point: Vec3| -> Option<egui::Pos2> {
         let delta = point - eye;
         let depth = delta.dot(forward);
-        if !point.is_finite() || depth < ZNEAR - 1e-9 || depth > ZFAR + 1e-9 {
+        if !point.is_finite() || !(ZNEAR - 1e-9..=ZFAR + 1e-9).contains(&depth) {
             return None;
         }
         Some(egui::pos2(
