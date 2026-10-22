@@ -443,33 +443,51 @@ fn native_catalog_path() -> std::path::PathBuf {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "catalog path has no parent",
-        )
-    })?;
+    atomic_write_with(path, bytes, |file| file.write_all(bytes))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn atomic_write_with(
+    path: &std::path::Path,
+    bytes: &[u8],
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = bytes;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = parent.join(format!(
+        ".mantis-save-{}.tmp",
+        crate::util::new_node_id().to_hex()
+    ));
     let mut options = std::fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.create_new(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
     let mut file = options.open(&tmp)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let staged = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        write(&mut file)?;
+        file.sync_all()?;
+        drop(file);
+        replace_atomic(&tmp, path)
+    })();
+    if let Err(error) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
     }
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    replace_atomic(&tmp, path)?;
     #[cfg(unix)]
     if let Err(error) = std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
         return Err(post_replace_durability_error(path, bytes, error));
@@ -492,7 +510,7 @@ fn post_replace_durability_error(
     };
     std::io::Error::new(
         sync_error.kind(),
-        format!("cannot sync catalog directory: {sync_error}; {verification}"),
+        format!("cannot sync workspace directory: {sync_error}; {verification}"),
     )
 }
 
@@ -1010,6 +1028,32 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("injected sync failure"));
         assert!(message.contains("crash durability is uncertain"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn interrupted_workspace_write_preserves_previous_file_and_removes_staging_file() {
+        use std::io::Write as _;
+        let directory = std::env::temp_dir().join(format!(
+            "mantis-interrupted-save-{}",
+            crate::util::new_node_id().to_hex()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("project.mantis");
+        atomic_write(&path, b"previous workspace").unwrap();
+        let result = atomic_write_with(&path, b"new workspace", |file| {
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("injected write failure"))
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("injected write failure"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous workspace");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        atomic_write(&path, b"new workspace").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new workspace");
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

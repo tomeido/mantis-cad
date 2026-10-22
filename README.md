@@ -88,6 +88,17 @@ MantisCAD의 문서(document)는 3D 형상이 아니라 **"컴포넌트가 적�
 
 ## 사용 방법
 
+### 프로젝트 열기·저장과 3D 선택
+
+**File → Open .mantis…** 또는 **Ctrl/⌘+O**로 프로젝트를 열고,
+**Save .mantis as… / Ctrl/⌘+S**로 저장합니다. 브라우저에서는 파일 업로드·다운로드,
+설치형 앱에서는 파일 선택창을 사용하며 `.mantis` 파일을 화면에 끌어 놓아도 열립니다.
+미커밋 작업과 복구 목록도 함께 보관하고 서명 비밀키는 포함하지 않습니다.
+
+3D 뷰포트에서 점·곡선·메시를 클릭하면 해당 출력 노드가 선택됩니다.
+**Shift+클릭**으로 선택을 추가·해제한 뒤 명령창에서 이동·회전·돌출을 이어갈 수
+있습니다. 빈 공간 클릭은 선택을 해제하고 드래그는 기존처럼 카메라를 회전합니다.
+
 ### 비주얼 스크립트에서 여러 노드 선택하기
 
 빈 공간을 **마우스 왼쪽 버튼으로 드래그**하면 선택 사각형에 걸친 노드를 함께 선택합니다.
@@ -279,6 +290,14 @@ cargo run -p mantis-cli -- audit model.mantis.json
 원자적 교체 덕분에 이전 체인 또는 완성된 새 체인 중 하나만 남고 부분 JSON은 노출되지 않습니다.
 전체 JSON 계약과 예제는 [AGENT_PROTOCOL.md](AGENT_PROTOCOL.md)에 있습니다.
 
+GUI와 CLI는 컴포넌트의 같은 파라미터 정의를 사용하므로 명령창의 이름 붙은 슬라이더,
+가져온 CAD 형상과 Grasshopper 저장 리스트도 에이전트가 이어서 편집할 수 있습니다.
+`--expected-head`와 문서 잠금으로 오래된 계획·동시 저장을 처리하며,
+`--json-errors`로 실패 원인을 자동화 도구가 읽을 수 있습니다.
+원격 프로젝트는 `mantis-cli pull FILE --server URL --project ID`로 받아 편집하고,
+`push`로 서명된 변경을 게시합니다. 큰 텍스트 파라미터는 기본 조회에서 요약되며
+`graph --json --node ID --full-parameters`로 필요한 노드만 전체 조회합니다.
+
 빌드 도구 버전은 `rust-toolchain.toml`과 워크플로에 고정되어 있습니다. Pull request에서는 native
 테스트·clippy·wasm 빌드·컨테이너 smoke test를 모두 실행합니다.
 
@@ -328,9 +347,9 @@ cargo run -p mantis-cli -- audit model.mantis.json
 
 MantisCAD is a featherweight Rhino-like parametric CAD in Rust. The document
 IS a Grasshopper-style node graph; every edit is a `GraphOp` sealed into
-sha256-linked, ed25519-signed blocks — **never geometry**. Peers replay the
-op-log deterministically to rebuild identical models, so a multi-megabyte
-model syncs as kilobytes. Workspace: `mantis-kernel` (geometry),
+sha256-linked, ed25519-signed blocks. Native parametric models replay from
+compact operations; imported CAD nodes also retain their geometry/source
+data in parameters. Workspace: `mantis-kernel` (geometry),
 `mantis-graph` (dataflow engine, 86 components), `mantis-chain` (op-log
 blockchain), `mantis-history` (definition and derived-preview revision diff),
 `mantis-protocol` (versioned project/access/sync contracts),

@@ -9,4 +9,9 @@ mantis-kernel = { workspace = true }
 mantis-graph = { workspace = true }
 mantis-chain = { workspace = true }
 mantis-history = { workspace = true }
+mantis-protocol = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+ureq = { version = "3.4", features = ["json"] }
+url = "2"

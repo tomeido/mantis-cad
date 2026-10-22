@@ -22,10 +22,10 @@ cargo run -p mantis-cli -- graph model.mantis.json --json > current-graph.json
 # Action: validate without writing, then commit the exact same batch
 cargo run -p mantis-cli -- apply model.mantis.json \
   --ops edit.ops.json --identity agent-1.identity.json \
-  --message "add the primary mass" --dry-run
+  --message "add the primary mass" --expected-head <observed-head-hash> --dry-run
 cargo run -p mantis-cli -- apply model.mantis.json \
   --ops edit.ops.json --identity agent-1.identity.json \
-  --message "add the primary mass"
+  --message "add the primary mass" --expected-head <observed-head-hash>
 
 # Verification
 cargo run -p mantis-cli -- verify model.mantis.json
@@ -40,6 +40,24 @@ destination file. A rejected edit leaves the prior file intact. If the process
 is interrupted during storage, the destination contains either the complete
 prior chain or the complete candidate chain, never a partially written JSON
 document; verify the head before deciding whether to retry.
+
+Local mutations hold an OS-backed document lock across loading, validation,
+and replacement. A concurrent writer receives `document_busy`; locks release
+when the process exits, including a crash. The retained `.mantis-lock` sidecar
+is normal and should not be removed while clients are running. `--dry-run`
+does not create a lock or write files. Pass `--expected-head` from
+`graph.materialized_at.hash` to reject a plan based on an outdated observation;
+`head_mismatch` requires observing the graph and planning again.
+This checks the committed history. For portable workspaces with unsigned
+edits, also pass `--expected-state` from `graph.state_hash`; it covers both
+the committed head and pending operations and returns `state_mismatch` if
+either changed after observation.
+
+Add the global `--json-errors` option to receive errors on stderr as
+`{"ok":false,"error":{"code":"...","message":"...","context":{...}}}`.
+Success remains on stdout. Usage errors exit 2; execution errors exit 1.
+Errors include operation indices, evaluation node IDs, or expected/actual
+heads when relevant. Node IDs in validation errors use the full 32 hex digits.
 
 By default, an evaluation error rejects the batch. `--allow-errors` exists for
 an intentionally incomplete intermediate graph and should be used explicitly.
@@ -98,6 +116,11 @@ Persistent parameter values use externally tagged enum JSON:
 inputs are ports, not parameters; create a `number_slider` and connect it when
 the value should remain visibly editable by a human.
 
+Parameter contracts come from the same component registry used by GUI-created
+documents. Common `label`/`__preview` fields, imported CAD `data` and document
+metadata, and stored-list `values` are discoverable and editable through the
+catalog. Unknown names and incorrect parameter types are still rejected.
+
 The six mutation variants are `AddNode`, `RemoveNode`, `Connect`,
 `Disconnect`, `SetParam`, and `MoveNode`. Exact examples for every variant are
 included in the catalog response.
@@ -120,9 +143,18 @@ derived geometry is summarized:
 ```
 
 Lists report at most the first 64 items plus their total length and a
-`truncated` flag. Mesh vertices are never returned through this perception
-endpoint and never stored in a block. Use `replay --obj` only when an actual
-exchange mesh is required.
+`truncated` flag. Derived mesh outputs contain summaries instead of vertices.
+Imported CAD nodes are an exception to geometry-free history: their `data`
+parameter retains validated geometry and optional source data. Use
+`replay --obj` when an exchange mesh is required.
+
+Text outputs and text parameters are limited to 1,024 UTF-8 bytes by default.
+Long parameters expose a prefix, original byte length, and `truncated: true`,
+so imported CAD source archives do not flood the observation. Use
+`graph FILE --json --node <32-hex-id>` for one node and its incident edges.
+To explicitly retrieve that node's complete stored parameters, add
+`--full-parameters` (requires both `--node` and `--json`). Small parameters keep
+their existing tagged JSON representation.
 
 `audit` returns the format version, genesis and head hashes, signed block and
 operation counts, and per-public-key activity. The head hash is a compact
@@ -140,6 +172,33 @@ new head.
 For collaborative servers, pushes remain fast-forward only. If the remote head
 moves, pull and replay it, then re-plan the local ops rather than rewriting or
 silently merging signed history.
+
+The CLI handles remote paging, checkpoint verification, and bounded CAS push
+batches directly. `--server` accepts an HTTP(S) origin or deployment prefix:
+
+```bash
+mantis-cli pull model.mantis.json \
+  --server https://domeido.asuscomm.com/mantis --project example-project --json-errors
+# Observe, dry-run, and apply locally with the observed --expected-head.
+mantis-cli push model.mantis.json \
+  --server https://domeido.asuscomm.com/mantis --project example-project --json-errors
+```
+
+Pull creates an absent local chain or fast-forwards an existing one. It
+preserves a divergent or newer local chain and reports `diverged`. Push sends
+only already signed blocks and needs no signing key. A changing download
+checkpoint reports `remote_changed`; a failed or uncertain push reports any
+acknowledged progress and stops without automatically retrying. Inspect the
+remote state before retrying an uncertain result. These CLI files contain the
+committed chain. GUI `.mantis` workspace exports additionally preserve pending
+and recovery work. `graph` and `apply` also accept these workspace files:
+graph observations include pending edits, while `verify`/`diff` inspect the
+committed history. Applying to a workspace with pending edits requires
+`--commit-pending`, explicitly signing those edits together with the new batch;
+without it, `pending_work_requires_commit` leaves the file unchanged. Recovery
+operations and workspace metadata are preserved. GUI Open also accepts a bare
+CLI chain JSON as a new workspace. For a remote handoff, use GUI Commit/Push
+followed by CLI Pull.
 
 The HTTP discovery/sync surface is also machine-oriented. Start with the
 versioned contract rather than guessing routes or JSON fields:

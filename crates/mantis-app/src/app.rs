@@ -115,6 +115,7 @@ pub struct MantisApp {
     delete_workspace: Option<String>,
     key_dialog: KeyBackupDialog,
     transfer_dialog: WorkspaceTransferDialog,
+    workspace_files: crate::workspace_file::WorkspaceFiles,
     show_recovery: bool,
     commit_msg: String,
     toasts: Vec<Toast>,
@@ -222,6 +223,7 @@ impl MantisApp {
             delete_workspace: None,
             key_dialog: KeyBackupDialog::default(),
             transfer_dialog: WorkspaceTransferDialog::default(),
+            workspace_files: crate::workspace_file::WorkspaceFiles::default(),
             show_recovery: false,
             commit_msg: String::new(),
             toasts: Vec::new(),
@@ -1248,14 +1250,22 @@ impl MantisApp {
                         errors.push(error);
                     }
                 }
-                if ui
-                    .button("file…")
-                    .on_hover_text("import/export .mantis")
-                    .clicked()
-                {
-                    self.transfer_dialog.open = true;
-                    self.transfer_dialog.error.clear();
-                }
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open workspace / chain…    Ctrl/Cmd+O").clicked() {
+                        if let Err(error) = self.workspace_files.open(ctx) { errors.push(error); }
+                        ui.close_menu();
+                    }
+                    if ui.button("Save .mantis as…    Ctrl/Cmd+S").clicked() {
+                        self.save_workspace_file(errors);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Copy / paste workspace JSON…").clicked() {
+                        self.transfer_dialog.open = true;
+                        self.transfer_dialog.error.clear();
+                        ui.close_menu();
+                    }
+                });
                 if ui.button("delete").clicked() {
                     self.delete_workspace = Some(active);
                 }
@@ -1679,6 +1689,129 @@ impl MantisApp {
         }
     }
 
+    fn import_workspace_file(&mut self, payload: &[u8]) -> Result<(), String> {
+        let mut snapshot = crate::workspace_file::decode(payload)?;
+        // Validate replay before modifying the catalog or leaving the current workspace.
+        let identity =
+            Identity::from_secret_hex(&self.doc.identity.name, &self.doc.identity.secret_hex())
+                .map_err(|error| format!("Cannot restore signing identity: {error}"))?;
+        Document::restore(
+            identity,
+            snapshot.chain.clone(),
+            snapshot.pending.clone(),
+            snapshot.recovery_ops.clone(),
+            None,
+        )?;
+        if self
+            .catalog
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == snapshot.id)
+        {
+            snapshot.id = next_workspace_id(&self.catalog);
+            snapshot.name = format!(
+                "{} import",
+                snapshot.name.chars().take(113).collect::<String>()
+            );
+        }
+        let id = snapshot.id.clone();
+        self.catalog.workspaces.push(snapshot);
+        if let Err(error) = self.switch_workspace(&id) {
+            self.catalog
+                .workspaces
+                .retain(|workspace| workspace.id != id);
+            return Err(error);
+        }
+        self.toast(
+            format!(
+                "Opened {}. Previous workspace retained.",
+                self.workspace_name
+            ),
+            false,
+        );
+        Ok(())
+    }
+
+    fn save_workspace_file(&mut self, errors: &mut Vec<String>) {
+        self.doc.end_gesture();
+        let result = crate::workspace_file::encode(&self.snapshot(true))
+            .and_then(|payload| crate::workspace_file::save(&payload, &self.workspace_name));
+        match result {
+            Ok(Some(message)) => self.toast(message, false),
+            Ok(None) => {}
+            Err(error) => errors.push(error),
+        }
+    }
+
+    fn workspace_file_actions(&mut self, ctx: &egui::Context, errors: &mut Vec<String>) {
+        for result in self.workspace_files.drain() {
+            if let Err(error) = result.and_then(|payload| self.import_workspace_file(&payload)) {
+                errors.push(error);
+            }
+        }
+        for file in ctx.input(|input| input.raw.dropped_files.clone()) {
+            let is_workspace = [".mantis", ".json"]
+                .iter()
+                .any(|extension| file.name.to_ascii_lowercase().ends_with(extension))
+                || file
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.extension())
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("mantis") || ext.eq_ignore_ascii_case("json")
+                    });
+            if !is_workspace {
+                continue;
+            }
+            let result = if let Some(bytes) = file.bytes {
+                self.import_workspace_file(&bytes)
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    file.path
+                        .ok_or_else(|| "Dropped workspace has no path".to_string())
+                        .and_then(|path| {
+                            use std::io::Read as _;
+                            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                            let mut bytes = Vec::new();
+                            file.take(crate::workspace_file::MAX_WORKSPACE_BYTES as u64 + 1)
+                                .read_to_end(&mut bytes)
+                                .map_err(|e| e.to_string())?;
+                            self.import_workspace_file(&bytes)
+                        })
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Err("Dropped workspace has no readable content".into())
+                }
+            };
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        }
+        let open = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::O,
+            ))
+        });
+        let save = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::S,
+            ))
+        });
+        if open {
+            if let Err(error) = self.workspace_files.open(ctx) {
+                errors.push(error);
+            }
+        }
+        if save {
+            self.save_workspace_file(errors);
+        }
+    }
+
     fn workspace_transfer_dialog(&mut self, ctx: &egui::Context, errors: &mut Vec<String>) {
         if !self.transfer_dialog.open {
             return;
@@ -1694,13 +1827,7 @@ impl MantisApp {
                 ui.horizontal(|ui| {
                     if ui.button("Export active workspace").clicked() {
                         self.doc.end_gesture();
-                        let result = self
-                            .snapshot(true)
-                            .to_portable()
-                            .and_then(|portable| {
-                                serde_json::to_string_pretty(&portable)
-                                    .map_err(|error| error.to_string())
-                            });
+                        let result = crate::workspace_file::encode(&self.snapshot(true));
                         match result {
                             Ok(payload) => {
                                 self.transfer_dialog.payload = payload;
@@ -1710,29 +1837,8 @@ impl MantisApp {
                         }
                     }
                     if ui.button("Import pasted workspace").clicked() {
-                        let result = serde_json::from_str::<mantis_protocol::PortableWorkspaceV1>(
-                            &self.transfer_dialog.payload,
-                        )
-                        .map_err(|error| format!("invalid .mantis JSON: {error}"))
-                        .and_then(WorkspaceSnapshotV1::from_portable)
-                        .and_then(|mut snapshot| {
-                            if self
-                                .catalog
-                                .workspaces
-                                .iter()
-                                .any(|workspace| workspace.id == snapshot.id)
-                            {
-                                snapshot.id = next_workspace_id(&self.catalog);
-                                snapshot.name = format!("{} import", snapshot.name);
-                            }
-                            let id = snapshot.id.clone();
-                            self.catalog.workspaces.push(snapshot);
-                            if let Err(error) = self.switch_workspace(&id) {
-                                self.catalog.workspaces.retain(|workspace| workspace.id != id);
-                                return Err(error);
-                            }
-                            Ok(())
-                        });
+                        let payload = self.transfer_dialog.payload.clone();
+                        let result = self.import_workspace_file(payload.as_bytes());
                         match result {
                             Ok(()) => {
                                 self.transfer_dialog.error.clear();
@@ -1968,6 +2074,7 @@ impl eframe::App for MantisApp {
             return;
         }
         let mut errors = Vec::new();
+        self.workspace_file_actions(ctx, &mut errors);
 
         self.sync.public_key = self.doc.identity.public_hex();
         self.sync.local_chain_format = self.doc.chain.format_version().unwrap_or(1);
@@ -2036,9 +2143,24 @@ impl eframe::App for MantisApp {
                 self.last_selection = self.editor.selection.clone();
             }
         }
-        egui::CentralPanel::default()
+        let picked = egui::CentralPanel::default()
             .frame(egui::Frame::default())
-            .show(ctx, |ui| self.viewport.ui(ui));
+            .show(ctx, |ui| self.viewport.ui(ui))
+            .inner;
+        if let Some(picked) = picked {
+            if !picked.additive {
+                self.editor.selection.clear();
+            }
+            if let Some(node) = picked.node {
+                if picked.additive && self.editor.selection.contains(&node) {
+                    self.editor.selection.remove(&node);
+                } else {
+                    self.editor.selection.insert(node);
+                }
+            }
+            self.editor.focus_selection(&self.doc);
+            ctx.request_repaint();
+        }
 
         let pointer_down = ctx.input(|input| input.pointer.any_down());
         let has_focus = ctx.memory(|memory| memory.focused().is_some());
@@ -2209,6 +2331,63 @@ mod tests {
             })
             .unwrap();
         app
+    }
+
+    #[test]
+    fn opening_file_keeps_existing_workspace_key_and_recovery_work() {
+        let mut app = memory_app();
+        let previous_id = app.catalog.active_id.clone();
+        let secret = app.doc.identity.secret_hex();
+        app.doc
+            .set_param(NodeId(1), "value", ParamValue::Number(7.0))
+            .unwrap();
+        let previous_graph = app.doc.graph.clone();
+        let mut imported = app.snapshot(false);
+        imported.name = "Imported workspace".into();
+        imported.pending.push(GraphOp::SetParam {
+            id: NodeId(1),
+            key: "value".into(),
+            value: ParamValue::Number(23.0),
+        });
+        imported
+            .recovery_ops
+            .push(GraphOp::RemoveNode { id: NodeId(99) });
+        let payload = crate::workspace_file::encode(&imported).unwrap();
+        app.import_workspace_file(payload.as_bytes()).unwrap();
+        assert_ne!(app.catalog.active_id, previous_id);
+        assert_eq!(app.doc.identity.secret_hex(), secret);
+        assert_eq!(app.doc.pending, imported.pending);
+        assert_eq!(app.doc.recovery_ops, imported.recovery_ops);
+        app.switch_workspace(&previous_id).unwrap();
+        assert_eq!(app.doc.graph, previous_graph);
+    }
+
+    #[test]
+    fn invalid_file_leaves_active_workspace_and_live_gesture_untouched() {
+        let mut app = memory_app();
+        let previous_id = app.catalog.active_id.clone();
+        app.doc
+            .param_drag(NodeId(1), "value", ParamValue::Number(9.0));
+        let graph = app.doc.graph.clone();
+        let workspace_count = app.catalog.workspaces.len();
+        assert!(app.import_workspace_file(b"invalid workspace").is_err());
+        assert_eq!(app.doc.graph, graph);
+        assert_eq!(app.catalog.active_id, previous_id);
+        assert_eq!(app.catalog.workspaces.len(), workspace_count);
+        assert!(app.doc.gesture_active());
+    }
+
+    #[test]
+    fn colliding_import_with_maximum_name_length_can_be_exported_again() {
+        let mut app = memory_app();
+        let mut imported = app.snapshot(false);
+        imported.name = "가".repeat(120);
+        let payload = crate::workspace_file::encode(&imported).unwrap();
+        app.import_workspace_file(payload.as_bytes()).unwrap();
+        assert_eq!(app.workspace_name.chars().count(), 120);
+        assert!(app.workspace_name.ends_with(" import"));
+        let exported = crate::workspace_file::encode(&app.snapshot(false)).unwrap();
+        crate::workspace_file::decode(exported.as_bytes()).unwrap();
     }
 
     #[test]

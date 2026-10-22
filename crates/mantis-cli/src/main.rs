@@ -19,6 +19,9 @@
 mod agent;
 mod demo;
 mod diff;
+mod document;
+mod local_io;
+mod remote;
 mod replay;
 
 use mantis_chain::{Chain, Identity};
@@ -33,9 +36,15 @@ USAGE:
   mantis-cli catalog [--json]                  component, port, and parameter schema
   mantis-cli apply FILE --ops OPS.json --identity ID.json --message TEXT
                     [--out FILE] [--timestamp MS] [--dry-run] [--allow-errors]
+                    [--expected-head HASH] [--expected-state HASH] [--commit-pending]
                                                validate, evaluate, sign, and atomically
                                                commit one GraphOp batch
-  mantis-cli graph FILE [--upto N] [--json]    materialized graph + evaluation results
+  mantis-cli graph FILE [--upto N] [--json] [--node ID [--full-parameters]]
+                                               materialized graph + evaluation results
+  mantis-cli pull FILE --server URL --project SLUG
+                                               clone or fast-forward a remote project
+  mantis-cli push FILE --server URL --project SLUG
+                                               publish signed blocks with head checks
   mantis-cli diff FILE [--from N] [--to N] [--json]
                                                compare committed definition + geometry
   mantis-cli audit FILE                         verified provenance + head checkpoint JSON
@@ -44,13 +53,21 @@ USAGE:
   mantis-cli replay FILE [--upto N] [--obj OUT.obj]
                                                replay op-log, evaluate graph,
                                                merge preview meshes, export OBJ
-  mantis-cli demo [--out FILE]                 write demo chain (default demo-chain.json)";
+  mantis-cli demo [--out FILE]                 write demo chain (default demo-chain.json)
+
+GLOBAL OPTIONS:
+  --json-errors                               emit structured errors on stderr";
 
 /// CLI failure: usage errors exit 2, runtime errors exit 1.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CliError {
     Usage(String),
     Runtime(String),
+    Detailed {
+        code: String,
+        message: String,
+        context: serde_json::Value,
+    },
 }
 
 impl CliError {
@@ -60,21 +77,105 @@ impl CliError {
     pub(crate) fn runtime(msg: impl Into<String>) -> CliError {
         CliError::Runtime(msg.into())
     }
+
+    pub(crate) fn coded(
+        code: &str,
+        message: impl Into<String>,
+        context: serde_json::Value,
+    ) -> CliError {
+        CliError::Detailed {
+            code: code.into(),
+            message: message.into(),
+            context,
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        if matches!(self, Self::Usage(_)) {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Usage(message) | Self::Runtime(message) | Self::Detailed { message, .. } => {
+                message
+            }
+        }
+    }
+
+    fn as_json(&self) -> serde_json::Value {
+        let (code, context) = match self {
+            Self::Usage(_) => ("invalid_arguments", serde_json::json!({})),
+            Self::Runtime(_) => ("runtime_error", serde_json::json!({})),
+            Self::Detailed { code, context, .. } => (code.as_str(), context.clone()),
+        };
+        serde_json::json!({
+            "ok": false,
+            "error": { "code": code, "message": self.message(), "context": context },
+        })
+    }
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let json_errors = take_json_errors(&mut args);
+    if args.len() == 1 && matches!(args[0].as_str(), "-h" | "--help" | "help") {
+        println!("{USAGE}");
+        return;
+    }
     match dispatch(&args) {
         Ok(output) => print!("{output}"),
-        Err(CliError::Usage(msg)) => {
-            eprintln!("{msg}");
-            std::process::exit(2);
-        }
-        Err(CliError::Runtime(msg)) => {
-            eprintln!("error: {msg}");
-            std::process::exit(1);
+        Err(error) => {
+            if json_errors {
+                eprintln!("{}", error.as_json());
+            } else if matches!(error, CliError::Usage(_)) {
+                eprintln!("{}", error.message());
+            } else {
+                eprintln!("error: {}", error.message());
+            }
+            std::process::exit(error.exit_code());
         }
     }
+}
+
+/// Global flags must not consume a literal option value, such as a commit
+/// message or a filename that happens to equal `--json-errors`.
+fn take_json_errors(args: &mut Vec<String>) -> bool {
+    let mut enabled = false;
+    let mut value_follows = false;
+    args.retain(|arg| {
+        if value_follows {
+            value_follows = false;
+            return true;
+        }
+        if arg == "--json-errors" {
+            enabled = true;
+            return false;
+        }
+        value_follows = matches!(
+            arg.as_str(),
+            "--name"
+                | "--out"
+                | "--ops"
+                | "--identity"
+                | "--message"
+                | "--timestamp"
+                | "--expected-head"
+                | "--expected-state"
+                | "--upto"
+                | "--from"
+                | "--to"
+                | "--obj"
+                | "--node"
+                | "--server"
+                | "--project"
+        );
+        true
+    });
+    enabled
 }
 
 /// Route a command line to its subcommand; returns the text to print.
@@ -89,6 +190,8 @@ fn dispatch(args: &[String]) -> Result<String, CliError> {
         "catalog" => agent::cmd_catalog(rest),
         "apply" => agent::cmd_apply(rest),
         "graph" => agent::cmd_graph(rest),
+        "pull" => remote::cmd_pull(rest),
+        "push" => remote::cmd_push(rest),
         "diff" => diff::cmd_diff(rest),
         "audit" => agent::cmd_audit(rest),
         "inspect" => cmd_inspect(rest),
@@ -104,10 +207,8 @@ fn dispatch(args: &[String]) -> Result<String, CliError> {
 
 /// Load + validate a chain file (Chain::from_json validates fully).
 pub(crate) fn load_chain(path: &str) -> Result<Chain, CliError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| CliError::runtime(format!("cannot read {path}: {e}")))?;
-    Chain::from_json(&text)
-        .map_err(|e| CliError::runtime(format!("invalid chain in {path}: [{}] {e}", e.code())))
+    crate::document::DocumentFile::load(std::path::Path::new(path))
+        .map(crate::document::DocumentFile::into_chain)
 }
 
 // ---------------------------------------------------------------------------
@@ -568,7 +669,7 @@ mod tests {
         let evil = chain.to_json().replace("tower profile", "TOWER PROFILE");
         std::fs::write(&path, evil).unwrap();
         match dispatch(&args(&["verify", path.to_str().unwrap()])) {
-            Err(CliError::Runtime(msg)) => assert!(msg.contains("[bad_hash]"), "{msg}"),
+            Err(error) => assert!(error.message().contains("[bad_hash]"), "{error:?}"),
             other => panic!("expected runtime error, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
@@ -578,7 +679,7 @@ mod tests {
     fn verify_missing_file_is_runtime_error() {
         assert!(matches!(
             dispatch(&args(&["verify", "/nonexistent/nope.json"])),
-            Err(CliError::Runtime(_))
+            Err(CliError::Detailed { code, .. }) if code == "read_failed"
         ));
     }
 

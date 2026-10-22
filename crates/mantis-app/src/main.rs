@@ -16,6 +16,7 @@ mod sync;
 mod util;
 mod viewport;
 mod workspace;
+mod workspace_file;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {

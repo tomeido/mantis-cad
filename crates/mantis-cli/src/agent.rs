@@ -4,7 +4,10 @@
 //! This module adds discovery, validation, signed atomic commits, and compact
 //! materialized-result inspection without introducing a second document API.
 
-use crate::{load_chain, now_ms, CliError};
+use crate::{
+    document::{working_state_hash, DocumentFile},
+    load_chain, now_ms, CliError,
+};
 use mantis_chain::{Chain, Identity};
 use mantis_graph::{
     Access, Evaluator, Graph, GraphOp, NodeId, ParamValue, Registry, Value, ValueKind,
@@ -16,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const LIST_REPORT_LIMIT: usize = 64;
+const TEXT_REPORT_LIMIT: usize = 1024;
 static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
@@ -59,6 +63,19 @@ fn curve_kind(curve: &Curve) -> &'static str {
     }
 }
 
+fn text_summary(text: &str) -> JsonValue {
+    let mut end = text.len().min(TEXT_REPORT_LIMIT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    json!({
+        "kind": "Text",
+        "bytes": text.len(),
+        "value": &text[..end],
+        "truncated": text.len() > end,
+    })
+}
+
 /// Compact, bounded JSON for a runtime value. Geometry is summarized instead
 /// of serializing derived vertices, keeping agent responses proportional to
 /// the graph rather than the tessellation size.
@@ -67,6 +84,7 @@ fn runtime_value_json(value: &Value) -> JsonValue {
         Value::Null => json!({ "kind": "Null" }),
         Value::Number(n) => json!({ "kind": "Number", "value": json_number(*n) }),
         Value::Bool(b) => json!({ "kind": "Bool", "value": b }),
+        Value::Text(text) if text.len() > TEXT_REPORT_LIMIT => text_summary(text),
         Value::Text(text) => json!({ "kind": "Text", "value": text }),
         Value::Vector(v) => json!({ "kind": "Vector", "value": vec3_json(*v) }),
         Value::Plane(p) => json!({ "kind": "Plane", "value": plane_json(*p) }),
@@ -135,67 +153,18 @@ fn access_name(access: Access) -> &'static str {
     }
 }
 
-fn param_json(name: &str, kind: &str, default: JsonValue, description: &str) -> JsonValue {
+fn param_json(parameter: &mantis_graph::ParamSpec) -> JsonValue {
+    let default = parameter.default.as_ref().map(|value| match value {
+        ParamValue::Number(number) => json_number(*number),
+        ParamValue::Bool(value) => json!(value),
+        ParamValue::Text(value) => json!(value),
+    });
     json!({
-        "name": name,
-        "kind": kind,
+        "name": parameter.name,
+        "kind": parameter.kind.name(),
         "default": default,
-        "description": description,
+        "description": parameter.description,
     })
-}
-
-/// Parameters are persistent node-local values, distinct from wired ports.
-/// `__preview` is common to all nodes; the remaining parameters correspond to
-/// the three built-ins with inline editors.
-fn parameter_schema(type_name: &str) -> Vec<JsonValue> {
-    let mut params = vec![param_json(
-        "__preview",
-        "Bool",
-        json!(true),
-        "Include geometric outputs in viewport/export preview",
-    )];
-    match type_name {
-        "number_slider" => {
-            params.push(param_json(
-                "min",
-                "Number",
-                json!(0.0),
-                "Slider lower bound",
-            ));
-            params.push(param_json(
-                "max",
-                "Number",
-                json!(10.0),
-                "Slider upper bound",
-            ));
-            params.push(param_json(
-                "step",
-                "Number",
-                json!(0.0),
-                "Snap interval; zero means continuous",
-            ));
-            params.push(param_json(
-                "value",
-                "Number",
-                json!(5.0),
-                "Current slider value",
-            ));
-        }
-        "bool_toggle" => params.push(param_json(
-            "value",
-            "Bool",
-            json!(false),
-            "Current toggle value",
-        )),
-        "panel" => params.push(param_json(
-            "text",
-            "Text",
-            json!(""),
-            "Text displayed while the panel input is unwired",
-        )),
-        _ => {}
-    }
-    params
 }
 
 fn port_schema(index: usize, port: &mantis_graph::PortSpec, is_input: bool) -> JsonValue {
@@ -232,7 +201,7 @@ fn catalog_json() -> JsonValue {
                 "category": component.category(),
                 "inputs": inputs,
                 "outputs": outputs,
-                "parameters": parameter_schema(component.type_name()),
+                "parameters": component.parameters().iter().map(param_json).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -260,8 +229,25 @@ fn catalog_json() -> JsonValue {
 
 /// Write via a sibling temporary file then rename, so a killed agent cannot
 /// leave a half-written chain at the destination.
-fn write_chain_atomic(path: &Path, chain: &Chain) -> Result<(), CliError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+pub(crate) fn write_chain_atomic(path: &Path, chain: &Chain) -> Result<(), CliError> {
+    write_json_atomic(path, format!("{}\n", chain.to_json()).as_bytes())
+}
+
+pub(crate) fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    // Locks resolve existing aliases to the target. Replace the same target
+    // so saving through a symbolic link preserves the link and its contents.
+    let resolved = if path.exists() || path.is_symlink() {
+        path.canonicalize().map_err(|error| {
+            CliError::runtime(format!("cannot resolve output {}: {error}", path.display()))
+        })?
+    } else {
+        path.to_path_buf()
+    };
+    let path = resolved.as_path();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -276,7 +262,7 @@ fn write_chain_atomic(path: &Path, chain: &Chain) -> Result<(), CliError> {
             .create_new(true)
             .write(true)
             .open(&temp)?;
-        file.write_all(format!("{}\n", chain.to_json()).as_bytes())?;
+        file.write_all(bytes)?;
         file.sync_all()
     })();
     if let Err(error) = write_result {
@@ -294,14 +280,16 @@ fn write_chain_atomic(path: &Path, chain: &Chain) -> Result<(), CliError> {
         )));
     }
     #[cfg(unix)]
-    if let Ok(directory) = std::fs::File::open(parent) {
-        directory.sync_all().map_err(|error| {
-            CliError::runtime(format!(
-                "cannot sync directory {} after replacing {}: {error}",
-                parent.display(),
-                path.display()
-            ))
-        })?;
+    {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                CliError::runtime(format!(
+                    "cannot sync directory {} after replacing {}: {error}",
+                    parent.display(),
+                    path.display()
+                ))
+            })?;
     }
     Ok(())
 }
@@ -354,6 +342,7 @@ pub(crate) fn cmd_init(args: &[String]) -> Result<String, CliError> {
         return Err(CliError::usage("usage: mantis-cli init FILE"));
     };
     let path = Path::new(path);
+    let _locks = crate::local_io::DocumentLocks::acquire(&[path])?;
     if path.exists() {
         return Err(CliError::runtime(format!(
             "refusing to overwrite existing {}",
@@ -431,25 +420,6 @@ fn kinds_compatible(from: ValueKind, to: ValueKind) -> bool {
         || (from == ValueKind::Number && to == ValueKind::Bool)
 }
 
-fn param_matches(value: &ParamValue, expected: &str) -> bool {
-    matches!(
-        (value, expected),
-        (ParamValue::Number(_), "Number")
-            | (ParamValue::Bool(_), "Bool")
-            | (ParamValue::Text(_), "Text")
-    )
-}
-
-fn expected_param_kind(type_name: &str, key: &str) -> Option<&'static str> {
-    match (type_name, key) {
-        (_, "__preview") => Some("Bool"),
-        ("number_slider", "min" | "max" | "step" | "value") => Some("Number"),
-        ("bool_toggle", "value") => Some("Bool"),
-        ("panel", "text") => Some("Text"),
-        _ => None,
-    }
-}
-
 /// Stricter than the chain's forward-compatible structural replay: an agent
 /// commit may not contain invisible wires, misspelled parameters, or known
 /// incompatible port kinds.
@@ -458,34 +428,24 @@ fn validate_agent_graph(graph: &Graph, registry: &Registry) -> Result<(), String
         if registry.get(&node.type_name).is_none() {
             return Err(format!(
                 "node {} uses unknown component {}; run `mantis-cli catalog --json`",
-                node.id, node.type_name
+                node.id.to_hex(),
+                node.type_name
             ));
         }
-        for (key, value) in &node.params {
-            let Some(expected) = expected_param_kind(&node.type_name, key) else {
-                return Err(format!(
-                    "node {} ({}): unknown parameter {key}",
-                    node.id, node.type_name
-                ));
-            };
-            if !param_matches(value, expected) {
-                return Err(format!(
-                    "node {} ({}): parameter {key} expects {expected}",
-                    node.id, node.type_name
-                ));
-            }
-        }
+        registry
+            .validate_parameters(&node.type_name, &node.params)
+            .map_err(|error| format!("node {} ({}): {error}", node.id.to_hex(), node.type_name))?;
     }
 
     for edge in &graph.edges {
         let source = graph
             .nodes
             .get(&edge.from.0)
-            .ok_or_else(|| format!("wire source {} does not exist", edge.from.0))?;
+            .ok_or_else(|| format!("wire source {} does not exist", edge.from.0.to_hex()))?;
         let target = graph
             .nodes
             .get(&edge.to.0)
-            .ok_or_else(|| format!("wire target {} does not exist", edge.to.0))?;
+            .ok_or_else(|| format!("wire target {} does not exist", edge.to.0.to_hex()))?;
         let source_component = registry
             .get(&source.type_name)
             .ok_or_else(|| format!("unknown source component {}", source.type_name))?;
@@ -497,9 +457,9 @@ fn validate_agent_graph(graph: &Graph, registry: &Registry) -> Result<(), String
         let output = outputs.get(edge.from.1 as usize).ok_or_else(|| {
             format!(
                 "wire {}:{} -> {}:{}: source port is out of range ({} outputs)",
-                edge.from.0,
+                edge.from.0.to_hex(),
                 edge.from.1,
-                edge.to.0,
+                edge.to.0.to_hex(),
                 edge.to.1,
                 outputs.len()
             )
@@ -507,9 +467,9 @@ fn validate_agent_graph(graph: &Graph, registry: &Registry) -> Result<(), String
         let input = inputs.get(edge.to.1 as usize).ok_or_else(|| {
             format!(
                 "wire {}:{} -> {}:{}: target port is out of range ({} inputs)",
-                edge.from.0,
+                edge.from.0.to_hex(),
                 edge.from.1,
-                edge.to.0,
+                edge.to.0.to_hex(),
                 edge.to.1,
                 inputs.len()
             )
@@ -517,10 +477,10 @@ fn validate_agent_graph(graph: &Graph, registry: &Registry) -> Result<(), String
         if !kinds_compatible(output.ty, input.ty) {
             return Err(format!(
                 "wire {}:{} ({}) -> {}:{} ({}): incompatible port kinds",
-                edge.from.0,
+                edge.from.0.to_hex(),
                 edge.from.1,
                 kind_name(output.ty),
-                edge.to.0,
+                edge.to.0.to_hex(),
                 edge.to.1,
                 kind_name(input.ty)
             ));
@@ -584,6 +544,9 @@ struct ApplyArgs {
     timestamp_ms: Option<u64>,
     dry_run: bool,
     allow_errors: bool,
+    expected_head: Option<String>,
+    expected_state: Option<String>,
+    commit_pending: bool,
 }
 
 fn parse_apply_args(args: &[String]) -> Result<ApplyArgs, CliError> {
@@ -601,6 +564,23 @@ fn parse_apply_args(args: &[String]) -> Result<ApplyArgs, CliError> {
             "--identity" => parsed.identity = Some(PathBuf::from(next("--identity", &mut index)?)),
             "--message" => parsed.message = Some(next("--message", &mut index)?.clone()),
             "--out" => parsed.output = Some(PathBuf::from(next("--out", &mut index)?)),
+            "--expected-head" | "--expected-state" => {
+                let value = next(arg, &mut index)?;
+                if value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(CliError::usage(format!(
+                        "{arg} needs 64 lowercase hex characters"
+                    )));
+                }
+                if arg == "--expected-head" {
+                    parsed.expected_head = Some(value.clone());
+                } else {
+                    parsed.expected_state = Some(value.clone());
+                }
+            }
             "--timestamp" => {
                 let value = next("--timestamp", &mut index)?;
                 parsed.timestamp_ms = Some(value.parse::<u64>().map_err(|_| {
@@ -609,6 +589,7 @@ fn parse_apply_args(args: &[String]) -> Result<ApplyArgs, CliError> {
             }
             "--dry-run" => parsed.dry_run = true,
             "--allow-errors" => parsed.allow_errors = true,
+            "--commit-pending" => parsed.commit_pending = true,
             value if !value.starts_with("--") && parsed.chain.is_none() => {
                 parsed.chain = Some(PathBuf::from(value));
             }
@@ -646,52 +627,98 @@ pub(crate) fn cmd_apply(args: &[String]) -> Result<String, CliError> {
         return Err(CliError::usage("apply message must not be empty"));
     }
 
-    let mut chain = load_chain(
-        chain_path
-            .to_str()
-            .ok_or_else(|| CliError::runtime("chain path is not valid UTF-8"))?,
-    )?;
+    let destination = parsed.output.as_ref().unwrap_or(&chain_path);
+    let _locks = if parsed.dry_run {
+        None
+    } else {
+        Some(crate::local_io::DocumentLocks::acquire(&[
+            &chain_path,
+            destination,
+        ])?)
+    };
+    let mut document = DocumentFile::load(&chain_path)?;
+    if let Some(expected) = &parsed.expected_head {
+        if expected != &document.chain().head().hash {
+            return Err(CliError::coded(
+                "head_mismatch",
+                "document changed since observation; read graph again and re-plan the edit",
+                json!({"expected_head": expected, "actual_head": document.chain().head().hash, "retryable": false}),
+            ));
+        }
+    }
+    let previous_state_hash = document.state_hash();
+    if let Some(expected) = &parsed.expected_state {
+        if expected != &previous_state_hash {
+            return Err(CliError::coded(
+                "state_mismatch",
+                "working definition changed since observation; read graph again and re-plan the edit",
+                json!({"expected_state": expected, "actual_state": previous_state_hash, "retryable": false}),
+            ));
+        }
+    }
+    let pending_count = document.pending().len();
+    if pending_count > 0 && !parsed.commit_pending {
+        return Err(CliError::coded(
+            "pending_work_requires_commit",
+            "workspace contains unsigned working edits; Commit in the GUI first, or use --commit-pending to explicitly sign the pending edits together with this batch",
+            json!({"pending_ops": pending_count, "path": chain_path}),
+        ));
+    }
     let identity = load_identity(&identity_path)?;
-    let ops = load_ops(&ops_path)?;
+    let mut ops = document.pending().to_vec();
+    ops.extend(load_ops(&ops_path)?);
 
     // Trial the complete batch before signing it. `apply_all` mutates only the
     // clone, so any failure leaves both memory and disk untouched.
-    let mut graph = chain
+    let mut graph = document
+        .chain()
         .replay(None)
         .map_err(|e| CliError::runtime(format!("cannot materialize chain: {e}")))?;
     graph.apply_all(&ops).map_err(|(index, error)| {
-        CliError::runtime(format!("GraphOp {index} rejected: {error}"))
+        CliError::coded(
+            "graph_op_rejected",
+            format!("GraphOp {index} rejected: {error}"),
+            json!({"op": index, "message": error.to_string()}),
+        )
     })?;
     let registry = Registry::standard();
-    validate_agent_graph(&graph, &registry).map_err(CliError::runtime)?;
+    validate_agent_graph(&graph, &registry)
+        .map_err(|message| CliError::coded("graph_validation_failed", message, json!({})))?;
     let evaluation = Evaluator::new().evaluate(&graph, &registry);
     if !parsed.allow_errors && !evaluation.errors.is_empty() {
         let summary = evaluation
             .errors
             .iter()
             .take(8)
-            .map(|(id, error)| format!("{id}: {error}"))
+            .map(|(id, error)| format!("{}: {error}", id.to_hex()))
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(CliError::runtime(format!(
+        return Err(CliError::coded("evaluation_failed", format!(
             "evaluation failed ({summary}); use --allow-errors only for an intentional incomplete graph"
-        )));
+        ), json!({"nodes": eval_error_json(&evaluation.errors)})));
     }
 
     let timestamp_ms = parsed.timestamp_ms.unwrap_or_else(now_ms);
     let op_count = ops.len();
-    chain
+    document
+        .chain_mut()
         .append(ops, &message, &identity, timestamp_ms)
         .map_err(|e| CliError::runtime(format!("cannot seal block: {e}")))?;
     // Exercise the exact load-time contract before touching the destination.
-    chain
+    document
+        .chain()
         .validate()
         .map_err(|e| CliError::runtime(format!("sealed chain failed validation: {e}")))?;
-    let block = chain.head();
+    document.committed(timestamp_ms);
+    let serialized = document.to_bytes()?;
+    let block = document.chain().head();
     let receipt = json!({
         "ok": true,
         "dry_run": parsed.dry_run,
         "path": parsed.output.as_ref().unwrap_or(&chain_path),
+        "committed_pending_ops": pending_count,
+        "previous_state_hash": previous_state_hash,
+        "state_hash": document.state_hash(),
         "block": {
             "index": block.index,
             "hash": block.hash,
@@ -711,7 +738,7 @@ pub(crate) fn cmd_apply(args: &[String]) -> Result<String, CliError> {
 
     if !parsed.dry_run {
         let destination = parsed.output.as_ref().unwrap_or(&chain_path);
-        write_chain_atomic(destination, &chain)?;
+        write_json_atomic(destination, &serialized)?;
     }
     Ok(format!(
         "{}\n",
@@ -723,16 +750,62 @@ pub(crate) fn cmd_apply(args: &[String]) -> Result<String, CliError> {
 // graph — bounded materialized result for agent perception
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn graph_json(chain: &Chain, upto: Option<usize>) -> Result<JsonValue, CliError> {
-    let graph = chain
+    graph_json_with_options(chain, &[], upto, None, false)
+}
+
+fn parameter_values_json(
+    parameters: &std::collections::BTreeMap<String, ParamValue>,
+    full: bool,
+) -> JsonValue {
+    let entries = parameters.iter().map(|(key, value)| {
+        let value = match value {
+            ParamValue::Text(text) if !full && text.len() > TEXT_REPORT_LIMIT => {
+                let mut summary = text_summary(text);
+                summary["read_full"] = json!("graph FILE --json --node NODE_ID --full-parameters");
+                summary
+            }
+            _ => serde_json::to_value(value).unwrap_or(JsonValue::Null),
+        };
+        (key.clone(), value)
+    });
+    JsonValue::Object(entries.collect())
+}
+
+fn graph_json_with_options(
+    chain: &Chain,
+    pending: &[GraphOp],
+    upto: Option<usize>,
+    only_node: Option<NodeId>,
+    full_parameters: bool,
+) -> Result<JsonValue, CliError> {
+    let mut graph = chain
         .replay(upto)
         .map_err(|e| CliError::runtime(format!("cannot replay graph: {e}")))?;
+    let pending = if upto.is_none() { pending } else { &[] };
+    graph.apply_all(pending).map_err(|(index, error)| {
+        CliError::coded(
+            "invalid_workspace_pending",
+            format!("pending operation {index} cannot be replayed: {error}"),
+            json!({"op": index}),
+        )
+    })?;
     let registry = Registry::standard();
+    if let Some(id) = only_node {
+        if !graph.nodes.contains_key(&id) {
+            return Err(CliError::runtime(format!(
+                "node {} does not exist at the requested revision",
+                id.to_hex()
+            )));
+        }
+    }
     let evaluation = Evaluator::new().evaluate(&graph, &registry);
     let nodes: Vec<JsonValue> = graph
         .topo_order()
         .into_iter()
         .filter_map(|id| graph.nodes.get(&id))
+        .filter(|node| only_node.is_none_or(|id| node.id == id))
         .map(|node| {
             let output_names: Vec<String> = registry
                 .get(&node.type_name)
@@ -765,7 +838,7 @@ fn graph_json(chain: &Chain, upto: Option<usize>) -> Result<JsonValue, CliError>
                 "id": node.id.to_hex(),
                 "type_name": node.type_name,
                 "position": [node.pos.0, node.pos.1],
-                "parameters": node.params,
+                "parameters": parameter_values_json(&node.params, full_parameters),
                 "preview": node.preview(),
                 "status": if evaluation.errors.contains_key(&node.id) { "error" } else { "ok" },
                 "error": evaluation.errors.get(&node.id),
@@ -776,6 +849,7 @@ fn graph_json(chain: &Chain, upto: Option<usize>) -> Result<JsonValue, CliError>
     let edges: Vec<JsonValue> = graph
         .edges
         .iter()
+        .filter(|edge| only_node.is_none_or(|id| edge.from.0 == id || edge.to.0 == id))
         .map(|edge| {
             json!({
                 "from": [edge.from.0.to_hex(), edge.from.1],
@@ -791,6 +865,9 @@ fn graph_json(chain: &Chain, upto: Option<usize>) -> Result<JsonValue, CliError>
         "protocol": "mantis-agent",
         "version": 1,
         "materialized_at": { "index": block.index, "hash": block.hash },
+        "state_hash": working_state_hash(&block.hash, pending),
+        "pending_ops": pending.len(),
+        "parameter_text_limit_bytes": if full_parameters { JsonValue::Null } else { json!(TEXT_REPORT_LIMIT) },
         "nodes": nodes,
         "edges": edges,
         "evaluation_errors": eval_error_json(&evaluation.errors),
@@ -801,10 +878,23 @@ pub(crate) fn cmd_graph(args: &[String]) -> Result<String, CliError> {
     let mut path: Option<String> = None;
     let mut upto: Option<usize> = None;
     let mut as_json = false;
+    let mut only_node = None;
+    let mut full_parameters = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--json" => as_json = true,
+            "--full-parameters" => full_parameters = true,
+            "--node" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| CliError::usage("--node needs a node id"))?;
+                only_node = Some(
+                    NodeId::from_hex(value)
+                        .ok_or_else(|| CliError::usage(format!("invalid --node id: {value}")))?,
+                );
+            }
             "--upto" => {
                 index += 1;
                 let value = args
@@ -819,10 +909,24 @@ pub(crate) fn cmd_graph(args: &[String]) -> Result<String, CliError> {
         }
         index += 1;
     }
-    let path =
-        path.ok_or_else(|| CliError::usage("usage: mantis-cli graph FILE [--upto N] [--json]"))?;
-    let chain = load_chain(&path)?;
-    let report = graph_json(&chain, upto)?;
+    let path = path.ok_or_else(|| {
+        CliError::usage(
+            "usage: mantis-cli graph FILE [--upto N] [--json] [--node ID [--full-parameters]]",
+        )
+    })?;
+    if full_parameters && (only_node.is_none() || !as_json) {
+        return Err(CliError::usage(
+            "--full-parameters requires --json and --node ID",
+        ));
+    }
+    let document = DocumentFile::load(Path::new(&path))?;
+    let report = graph_json_with_options(
+        document.chain(),
+        document.pending(),
+        upto,
+        only_node,
+        full_parameters,
+    )?;
     if as_json {
         return Ok(format!(
             "{}\n",
@@ -830,9 +934,10 @@ pub(crate) fn cmd_graph(args: &[String]) -> Result<String, CliError> {
         ));
     }
     let mut text = format!(
-        "materialized block {} {}\n",
+        "materialized block {} {} ({} pending ops)\n",
         report["materialized_at"]["index"].as_u64().unwrap_or(0),
-        report["materialized_at"]["hash"].as_str().unwrap_or("")
+        report["materialized_at"]["hash"].as_str().unwrap_or(""),
+        report["pending_ops"].as_u64().unwrap_or(0)
     );
     if let Some(nodes) = report["nodes"].as_array() {
         for node in nodes {
@@ -927,6 +1032,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|parameter| parameter["name"] == "value"));
+        for component in Registry::standard().iter() {
+            let catalog_component = components
+                .iter()
+                .find(|entry| entry["type_name"] == component.type_name())
+                .unwrap();
+            let expected: Vec<_> = component.parameters().iter().map(param_json).collect();
+            assert_eq!(catalog_component["parameters"], json!(expected));
+        }
     }
 
     #[test]
@@ -1032,12 +1145,8 @@ mod tests {
             "--message",
             "bad port",
         ]));
-        match result {
-            Err(CliError::Runtime(message)) => {
-                assert!(message.contains("out of range"), "{message}")
-            }
-            other => panic!("expected port validation error, got {other:?}"),
-        }
+        let error = result.unwrap_err();
+        assert!(error.message().contains("out of range"), "{error:?}");
         assert_eq!(load_chain(chain_path.to_str().unwrap()).unwrap().len(), 1);
 
         for path in [chain_path, identity_path, ops_path] {
@@ -1068,10 +1177,10 @@ mod tests {
             "--message",
             "incomplete",
         ];
-        assert!(matches!(
-            cmd_apply(&strings(&base)),
-            Err(CliError::Runtime(_))
-        ));
+        assert!(cmd_apply(&strings(&base))
+            .unwrap_err()
+            .message()
+            .contains("evaluation failed"));
         assert_eq!(load_chain(chain_path.to_str().unwrap()).unwrap().len(), 1);
 
         let mut dry_args = base.to_vec();
@@ -1082,6 +1191,526 @@ mod tests {
         assert_eq!(load_chain(chain_path.to_str().unwrap()).unwrap().len(), 1);
 
         for path in [chain_path, identity_path, ops_path] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn agent_can_edit_documents_with_gui_command_cad_and_grasshopper_parameters() {
+        use mantis_graph::geometry::{GeometryData, GeometryRecord};
+
+        let chain_path = temp_path("handoff-model.json");
+        let identity_path = temp_path("handoff-identity.json");
+        let ops_path = temp_path("handoff-ops.json");
+        let human = Identity::generate("human-designer");
+        let agent = Identity::generate("cad-agent");
+        write_identity(&identity_path, &agent);
+
+        let mut gui_ops = Vec::new();
+        for (id, ty) in [
+            (1, "circle"),
+            (2, "number_slider"),
+            (3, "point_xyz"),
+            (4, "panel"),
+            (5, "imported_geometry"),
+            (6, "constant_list"),
+        ] {
+            gui_ops.push(GraphOp::AddNode {
+                id: NodeId(id),
+                type_name: ty.into(),
+                pos: (0.0, 0.0),
+            });
+        }
+        let record = GeometryRecord {
+            name: "Imported point".into(),
+            layer: "Layer 1".into(),
+            geometry: GeometryData::Point {
+                point: Vec3::new(1.0, 2.0, 3.0),
+            },
+            source: None,
+        };
+        // Same persistent fields written by Recipe::number/vector,
+        // cad_io::insert_records and grasshopper::Plan::literals.
+        for (id, key, value) in [
+            (2, "label", ParamValue::Text("radius".into())),
+            (2, "value", ParamValue::Number(5.0)),
+            (2, "min", ParamValue::Number(-10.0)),
+            (2, "max", ParamValue::Number(10.0)),
+            (3, "label", ParamValue::Text("center".into())),
+            (3, "__preview", ParamValue::Bool(false)),
+            (
+                4,
+                "text",
+                ParamValue::Text("CAD source document (shared metadata)".into()),
+            ),
+            (
+                4,
+                "__cad_document",
+                ParamValue::Text("{\"units\":2}".into()),
+            ),
+            (4, "__preview", ParamValue::Bool(false)),
+            (5, "data", ParamValue::Text(record.to_json().unwrap())),
+            (5, "label", ParamValue::Text(record.name.clone())),
+            (
+                5,
+                "__cad_document_node",
+                ParamValue::Text(NodeId(4).to_hex()),
+            ),
+            (
+                6,
+                "values",
+                ParamValue::Text("[1,2,true,\"Grasshopper text\"]".into()),
+            ),
+            (6, "label", ParamValue::Text("Imported GH panel".into())),
+            (6, "__preview", ParamValue::Bool(false)),
+        ] {
+            gui_ops.push(GraphOp::SetParam {
+                id: NodeId(id),
+                key: key.into(),
+                value,
+            });
+        }
+        gui_ops.push(GraphOp::Connect {
+            from: (NodeId(2), 0),
+            to: (NodeId(1), 1),
+        });
+        gui_ops.push(GraphOp::Connect {
+            from: (NodeId(3), 0),
+            to: (NodeId(1), 0),
+        });
+        let mut chain = Chain::new();
+        chain
+            .append(gui_ops, "GUI commands and CAD/GHX import", &human, 100)
+            .unwrap();
+        write_chain_atomic(&chain_path, &chain).unwrap();
+        let edits: Vec<_> = (1..=6)
+            .map(|id| GraphOp::MoveNode {
+                id: NodeId(id),
+                pos: (120.0, 80.0),
+            })
+            .collect();
+        std::fs::write(&ops_path, serde_json::to_string(&edits).unwrap()).unwrap();
+        let receipt: JsonValue = serde_json::from_str(
+            &cmd_apply(&strings(&[
+                chain_path.to_str().unwrap(),
+                "--ops",
+                ops_path.to_str().unwrap(),
+                "--identity",
+                identity_path.to_str().unwrap(),
+                "--message",
+                "continue human design",
+                "--timestamp",
+                "200",
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["graph"]["evaluation_errors"], json!([]));
+        let edited = load_chain(chain_path.to_str().unwrap()).unwrap();
+        edited.validate().unwrap();
+        assert_eq!(edited.len(), 3);
+        assert_eq!(edited.head().author, "cad-agent");
+        let graph = edited.replay(None).unwrap();
+        assert_eq!(
+            graph.nodes[&NodeId(5)].params["data"],
+            ParamValue::Text(record.to_json().unwrap())
+        );
+        assert_eq!(graph.nodes[&NodeId(6)].pos, (120.0, 80.0));
+        for path in [chain_path, identity_path, ops_path] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn shared_contract_keeps_misspelled_and_wrongly_typed_parameters_invalid() {
+        let registry = Registry::standard();
+        for (key, value, expected) in [
+            (
+                "lable",
+                ParamValue::Text("radius".into()),
+                "unknown parameter lable",
+            ),
+            (
+                "label",
+                ParamValue::Bool(true),
+                "parameter label expects Text",
+            ),
+            (
+                "value",
+                ParamValue::Text("five".into()),
+                "parameter value expects Number",
+            ),
+        ] {
+            let mut graph = Graph::new();
+            graph
+                .apply_all(&[
+                    GraphOp::AddNode {
+                        id: NodeId(1),
+                        type_name: "number_slider".into(),
+                        pos: (0.0, 0.0),
+                    },
+                    GraphOp::SetParam {
+                        id: NodeId(1),
+                        key: key.into(),
+                        value,
+                    },
+                ])
+                .unwrap();
+            assert!(validate_agent_graph(&graph, &registry)
+                .unwrap_err()
+                .contains(expected));
+        }
+    }
+
+    #[test]
+    fn graph_bounds_large_text_and_allows_explicit_full_parameter_for_one_node() {
+        use mantis_graph::geometry::{GeometryData, GeometryRecord, GeometrySource};
+
+        let path = temp_path("bounded-graph.json");
+        let text = "🪲".repeat(8_000);
+        let record = GeometryRecord {
+            name: "Preserved CAD".into(),
+            layer: String::new(),
+            geometry: GeometryData::Point {
+                point: Vec3::new(1.0, 2.0, 3.0),
+            },
+            source: Some(GeometrySource {
+                format: "test".into(),
+                data: text.clone(),
+                preview_units: None,
+            }),
+        };
+        let data = record.to_json().unwrap();
+        let mut chain = Chain::new();
+        chain
+            .append(
+                vec![
+                    GraphOp::AddNode {
+                        id: NodeId(1),
+                        type_name: "imported_geometry".into(),
+                        pos: (0.0, 0.0),
+                    },
+                    GraphOp::SetParam {
+                        id: NodeId(1),
+                        key: "data".into(),
+                        value: ParamValue::Text(data.clone()),
+                    },
+                    GraphOp::AddNode {
+                        id: NodeId(2),
+                        type_name: "constant_list".into(),
+                        pos: (0.0, 0.0),
+                    },
+                    GraphOp::SetParam {
+                        id: NodeId(2),
+                        key: "values".into(),
+                        value: ParamValue::Text(serde_json::to_string(&vec![&text]).unwrap()),
+                    },
+                ],
+                "large imported source",
+                &Identity::generate("human"),
+                100,
+            )
+            .unwrap();
+        write_chain_atomic(&path, &chain).unwrap();
+        let compact = cmd_graph(&strings(&[path.to_str().unwrap(), "--json"])).unwrap();
+        assert!(
+            compact.len() < 8_000,
+            "unexpectedly large report: {} bytes",
+            compact.len()
+        );
+        let report: JsonValue = serde_json::from_str(&compact).unwrap();
+        assert_eq!(report["nodes"][0]["parameters"]["data"]["truncated"], true);
+        assert_eq!(
+            report["nodes"][0]["parameters"]["data"]["bytes"],
+            data.len()
+        );
+        assert_eq!(
+            report["nodes"][1]["outputs"][0]["value"]["items"][0]["truncated"],
+            true
+        );
+        let node = NodeId(1).to_hex();
+        let full: JsonValue = serde_json::from_str(
+            &cmd_graph(&strings(&[
+                path.to_str().unwrap(),
+                "--json",
+                "--node",
+                &node,
+                "--full-parameters",
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(full["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(full["nodes"][0]["parameters"]["data"]["Text"], data);
+        assert!(cmd_graph(&strings(&[
+            path.to_str().unwrap(),
+            "--json",
+            "--full-parameters"
+        ]))
+        .is_err());
+        assert!(cmd_graph(&strings(&[
+            path.to_str().unwrap(),
+            "--json",
+            "--node",
+            &NodeId(99).to_hex()
+        ]))
+        .is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn portable_workspace_observation_and_explicit_signed_handoff_preserve_work() {
+        use mantis_protocol::{PortableWorkspaceV1, PORTABLE_WORKSPACE_VERSION};
+
+        let path = temp_path("portable.mantis");
+        let identity_path = temp_path("portable-identity.json");
+        let ops_path = temp_path("portable-ops.json");
+        let human = Identity::generate("human-designer");
+        let agent = Identity::generate("agent-finisher");
+        write_identity(&identity_path, &agent);
+        let mut chain = Chain::new();
+        chain
+            .append(
+                vec![
+                    GraphOp::AddNode {
+                        id: NodeId(1),
+                        type_name: "number_slider".into(),
+                        pos: (0.0, 0.0),
+                    },
+                    GraphOp::SetParam {
+                        id: NodeId(1),
+                        key: "value".into(),
+                        value: ParamValue::Number(2.0),
+                    },
+                ],
+                "human committed model",
+                &human,
+                100,
+            )
+            .unwrap();
+        let pending = vec![
+            GraphOp::SetParam {
+                id: NodeId(1),
+                key: "value".into(),
+                value: ParamValue::Number(7.0),
+            },
+            GraphOp::SetParam {
+                id: NodeId(1),
+                key: "label".into(),
+                value: ParamValue::Text("Human radius".into()),
+            },
+            GraphOp::AddNode {
+                id: NodeId(2),
+                type_name: "point_xyz".into(),
+                pos: (40.0, 20.0),
+            },
+        ];
+        let remote = serde_json::from_value(json!({
+            "base_url": "https://cad.example", "project_id": "demo",
+            "chain_format_version": chain.format_version().unwrap(), "chain_id": chain.chain_id().unwrap(),
+            "genesis_hash": chain.blocks[0].hash, "last_synced_len": chain.len(),
+            "last_synced_head": chain.head().hash, "access": "writer",
+        })).unwrap();
+        let workspace = PortableWorkspaceV1 {
+            format_version: PORTABLE_WORKSPACE_VERSION,
+            id: "human-workspace".into(),
+            name: "Shared design".into(),
+            updated_ms: 100,
+            chain,
+            pending: pending.clone(),
+            recovery_ops: vec![GraphOp::RemoveNode { id: NodeId(99) }],
+            remote: Some(remote),
+        };
+        let original = serde_json::to_vec_pretty(&workspace).unwrap();
+        write_json_atomic(&path, &original).unwrap();
+        let observed: JsonValue = serde_json::from_str(
+            &cmd_graph(&strings(&[path.to_str().unwrap(), "--json"])).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(observed["pending_ops"], 3);
+        assert_eq!(
+            observed["materialized_at"]["hash"],
+            workspace.chain.head().hash
+        );
+        assert_eq!(observed["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(observed["nodes"][0]["outputs"][0]["value"]["value"], 7.0);
+        let historic: JsonValue = serde_json::from_str(
+            &cmd_graph(&strings(&[path.to_str().unwrap(), "--json", "--upto", "1"])).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(historic["pending_ops"], 0);
+        assert_eq!(historic["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(historic["nodes"][0]["outputs"][0]["value"]["value"], 2.0);
+        // Committed-history commands can read the same file, without sealing WIP.
+        assert_eq!(load_chain(path.to_str().unwrap()).unwrap(), workspace.chain);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let edits = vec![
+            GraphOp::MoveNode {
+                id: NodeId(2),
+                pos: (120.0, 80.0),
+            },
+            GraphOp::SetParam {
+                id: NodeId(1),
+                key: "value".into(),
+                value: ParamValue::Number(9.0),
+            },
+        ];
+        std::fs::write(&ops_path, serde_json::to_vec(&edits).unwrap()).unwrap();
+        let base = strings(&[
+            path.to_str().unwrap(),
+            "--ops",
+            ops_path.to_str().unwrap(),
+            "--identity",
+            identity_path.to_str().unwrap(),
+            "--message",
+            "explicitly continue human WIP",
+            "--timestamp",
+            "200",
+        ]);
+        assert!(
+            matches!(cmd_apply(&base), Err(CliError::Detailed { code, .. }) if code == "pending_work_requires_commit")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let mut explicit = base.clone();
+        explicit.push("--commit-pending".into());
+        let mut dry_run = explicit.clone();
+        dry_run.push("--dry-run".into());
+        cmd_apply(&dry_run).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let receipt: JsonValue = serde_json::from_str(&cmd_apply(&explicit).unwrap()).unwrap();
+        assert_eq!(receipt["committed_pending_ops"], 3);
+        let updated: PortableWorkspaceV1 =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        updated.validate().unwrap();
+        assert_eq!(updated.id, workspace.id);
+        assert_eq!(updated.name, workspace.name);
+        assert_eq!(updated.remote, workspace.remote);
+        assert_eq!(updated.recovery_ops, workspace.recovery_ops);
+        assert_eq!(updated.updated_ms, 200);
+        assert!(updated.pending.is_empty());
+        assert_eq!(updated.chain.head().author, "agent-finisher");
+        let mut expected_ops = pending;
+        expected_ops.extend(edits);
+        assert_eq!(updated.chain.head().ops, expected_ops);
+        let graph = updated.chain.replay(None).unwrap();
+        assert_eq!(
+            graph.nodes[&NodeId(1)].params["value"],
+            ParamValue::Number(9.0)
+        );
+        assert_eq!(graph.nodes[&NodeId(2)].pos, (120.0, 80.0));
+        for path in [path, identity_path, ops_path] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn expected_state_detects_pending_changes_with_an_unchanged_committed_head() {
+        use mantis_protocol::{PortableWorkspaceV1, PORTABLE_WORKSPACE_VERSION};
+        let path = temp_path("working-state.mantis");
+        let identity_path = temp_path("working-state-identity.json");
+        let ops_path = temp_path("working-state-ops.json");
+        write_identity(&identity_path, &Identity::generate("agent"));
+        let mut workspace = PortableWorkspaceV1 {
+            format_version: PORTABLE_WORKSPACE_VERSION,
+            id: "working-state".into(),
+            name: "Working state".into(),
+            updated_ms: 100,
+            chain: Chain::new(),
+            recovery_ops: Vec::new(),
+            remote: None,
+            pending: vec![GraphOp::AddNode {
+                id: NodeId(1),
+                type_name: "number_slider".into(),
+                pos: (0.0, 0.0),
+            }],
+        };
+        write_json_atomic(&path, &serde_json::to_vec(&workspace).unwrap()).unwrap();
+        let observed: JsonValue = serde_json::from_str(
+            &cmd_graph(&strings(&[path.to_str().unwrap(), "--json"])).unwrap(),
+        )
+        .unwrap();
+        let observed_state = observed["state_hash"].as_str().unwrap();
+        workspace.pending.push(GraphOp::SetParam {
+            id: NodeId(1),
+            key: "value".into(),
+            value: ParamValue::Number(3.0),
+        });
+        let changed = serde_json::to_vec(&workspace).unwrap();
+        write_json_atomic(&path, &changed).unwrap();
+        let actual_state = working_state_hash(&workspace.chain.head().hash, &workspace.pending);
+        assert_ne!(observed_state, actual_state);
+        assert_eq!(
+            observed["materialized_at"]["hash"],
+            workspace.chain.head().hash
+        );
+        std::fs::write(
+            &ops_path,
+            serde_json::to_vec(&vec![GraphOp::MoveNode {
+                id: NodeId(1),
+                pos: (20.0, 30.0),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = strings(&[
+            path.to_str().unwrap(),
+            "--ops",
+            ops_path.to_str().unwrap(),
+            "--identity",
+            identity_path.to_str().unwrap(),
+            "--message",
+            "continue observed work",
+            "--commit-pending",
+            "--expected-head",
+            &workspace.chain.head().hash,
+            "--expected-state",
+            observed_state,
+        ]);
+        match cmd_apply(&args) {
+            Err(CliError::Detailed { code, context, .. }) => {
+                assert_eq!(code, "state_mismatch");
+                assert_eq!(context["actual_state"], actual_state);
+            }
+            other => panic!("expected pending state conflict, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), changed);
+        *args.last_mut().unwrap() = actual_state.clone();
+        let receipt: JsonValue = serde_json::from_str(&cmd_apply(&args).unwrap()).unwrap();
+        assert_eq!(receipt["previous_state_hash"], actual_state);
+        let updated = DocumentFile::load(&path).unwrap();
+        assert!(updated.pending().is_empty());
+        assert_eq!(receipt["state_hash"], updated.state_hash());
+        assert_eq!(
+            updated.chain().replay(None).unwrap().nodes[&NodeId(1)].pos,
+            (20.0, 30.0)
+        );
+        for path in [path, identity_path, ops_path] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_chain_write_through_symlink_replaces_target_and_keeps_alias() {
+        let target = temp_path("symlink-target.json");
+        let alias = temp_path("symlink-alias.json");
+        let mut chain = Chain::new();
+        write_chain_atomic(&target, &chain).unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        chain
+            .append(
+                sphere_ops(NodeId(1)),
+                "signed update",
+                &Identity::generate("agent"),
+                100,
+            )
+            .unwrap();
+        write_chain_atomic(&alias, &chain).unwrap();
+        assert!(alias.is_symlink());
+        assert_eq!(load_chain(target.to_str().unwrap()).unwrap(), chain);
+        assert_eq!(load_chain(alias.to_str().unwrap()).unwrap(), chain);
+        for path in [alias, target] {
             let _ = std::fs::remove_file(path);
         }
     }

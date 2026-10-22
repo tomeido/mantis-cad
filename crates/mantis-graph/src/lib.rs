@@ -8,9 +8,11 @@ pub mod components;
 pub mod eval;
 pub mod geometry;
 pub mod graph;
+pub mod parameters;
 pub mod value;
 
 pub use component::{Access, Component, PortSpec, Registry};
 pub use eval::{EvalOutput, Evaluator};
 pub use graph::{Edge, Graph, GraphError, GraphOp, Node, NodeId};
+pub use parameters::{ParamKind, ParamSpec};
 pub use value::{ParamValue, Value, ValueKind};

@@ -1,7 +1,7 @@
 # Deployment and operations
 
 MantisCAD ships one OCI image containing the browser application,
-`mantis-server`, and `mantis-admin`. The server serves the WASM bundle and API
+`mantis-server`, `mantis-admin`, and the headless `mantis-cli` agent tools. The server serves the WASM bundle and API
 from one origin. Only `/data` is mutable; it must be backed by durable storage.
 
 Merging these files does not by itself create a public site. The repository
@@ -62,6 +62,16 @@ cargo run --locked --release -p mantis-admin -- --help
 
 The OCI image also contains `mantis-admin`, but signing keys should normally
 stay on the administrator's machine rather than being copied into the service.
+
+Inspect the component contract without starting a server or mounting data:
+
+```bash
+docker run --rm --entrypoint mantis-cli ghcr.io/tomeido/mantis-cad:latest catalog --json
+```
+
+Use a separate tools container with a dedicated workspace for agent edits;
+the production server data volume is not a CLI working directory. CLI
+`pull`/`push` use the versioned project API and preserve its CAS checks.
 
 Never delete the named volume during a routine upgrade. In particular, do not
 use `docker compose down --volumes` unless the project history is intentionally

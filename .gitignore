@@ -13,4 +13,5 @@ dist/
 .env
 .env.*
 .*.mantis-tmp-*
+.*.mantis-lock
 .trunk/

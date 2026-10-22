@@ -1,5 +1,6 @@
 //! Component trait + registry.
 
+use crate::parameters::{common_parameters, ParamSpec};
 use crate::value::{ParamValue, Value, ValueKind};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -61,6 +62,11 @@ pub trait Component: Send + Sync {
     fn category(&self) -> &'static str;
     fn inputs(&self) -> Vec<PortSpec>;
     fn outputs(&self) -> Vec<PortSpec>;
+    /// Persistent node-local values, including shared presentation metadata.
+    /// Custom components can extend `common_parameters()` with their own keys.
+    fn parameters(&self) -> Vec<ParamSpec> {
+        common_parameters()
+    }
     /// Evaluate. `inputs.len() == self.inputs().len()` (engine fills defaults /
     /// Null). For Item ports the engine has already unwrapped lists — eval sees
     /// scalars there. Must be pure & deterministic.
@@ -95,6 +101,30 @@ impl Registry {
     }
     pub fn get(&self, type_name: &str) -> Option<&Arc<dyn Component>> {
         self.map.get(type_name)
+    }
+    pub fn parameter_schema(&self, type_name: &str) -> Option<Vec<ParamSpec>> {
+        self.get(type_name).map(|component| component.parameters())
+    }
+    /// Strict key/type checks use the same contract exposed by component
+    /// discovery. Geometry/list payload contents are validated on evaluation.
+    pub fn validate_parameters(
+        &self,
+        type_name: &str,
+        params: &BTreeMap<String, ParamValue>,
+    ) -> Result<(), String> {
+        let schema = self
+            .parameter_schema(type_name)
+            .ok_or_else(|| format!("unknown component {type_name}"))?;
+        for (key, value) in params {
+            let spec = schema
+                .iter()
+                .find(|spec| spec.name == key)
+                .ok_or_else(|| format!("unknown parameter {key}"))?;
+            if !spec.kind.accepts(value) {
+                return Err(format!("parameter {key} expects {}", spec.kind.name()));
+            }
+        }
+        Ok(())
     }
     /// Deterministic (name-sorted) iteration — used by the palette UI.
     pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Component>> {

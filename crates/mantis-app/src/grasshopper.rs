@@ -1303,6 +1303,16 @@ mod tests {
     const SERIES: &str = include_str!("../tests/fixtures/grasshopper/mcneel_sliders_series.ghx");
     const CIRCLE: &str = include_str!("../tests/fixtures/grasshopper/mcneel_circle_unit_z.ghx");
     const TEXT: &str = include_str!("../tests/fixtures/grasshopper/mcneel_text.ghx");
+    #[test]
+    fn imported_text_parameters_follow_the_shared_agent_schema() {
+        let imported = graph(&import_ghx(TEXT).unwrap());
+        let registry = Registry::standard();
+        for node in imported.nodes.values() {
+            registry
+                .validate_parameters(&node.type_name, &node.params)
+                .unwrap();
+        }
+    }
     fn graph(report: &ImportReport) -> Graph {
         let mut g = Graph::new();
         g.apply_all(&report.ops).unwrap();

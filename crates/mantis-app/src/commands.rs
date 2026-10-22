@@ -386,6 +386,11 @@ pub fn visible_mesh_obj(doc: &mut Document) -> Result<String, String> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn download_obj(payload: &str) -> Result<(), String> {
+    download_text(payload, "mantis-model.obj")
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn download_text(payload: &str, filename: &str) -> Result<(), String> {
     use wasm_bindgen::{closure::Closure, JsCast as _, JsValue};
     let window = web_sys::window().ok_or("Browser window unavailable")?;
     let document = window.document().ok_or("Browser document unavailable")?;
@@ -395,7 +400,7 @@ pub fn download_obj(payload: &str) -> Result<(), String> {
         .map_err(|_| "Cannot create download")?
         .dyn_into::<web_sys::HtmlAnchorElement>()
         .map_err(|_| "Download unavailable")?;
-    anchor.set_download("mantis-model.obj");
+    anchor.set_download(filename);
     let parts = js_sys::Array::new();
     parts.push(&JsValue::from_str(payload));
     let blob =
@@ -933,6 +938,19 @@ mod tests {
 
     fn doc() -> Document {
         Document::new(Identity::from_secret_hex("command test", &"19".repeat(32)).unwrap())
+    }
+    #[test]
+    fn command_created_parameters_follow_the_shared_agent_schema() {
+        let mut d = doc();
+        for command in ["Circle 5", "Line 0 0 0 1 2 3"] {
+            execute(&mut d, &BTreeSet::new(), command).unwrap();
+        }
+        let registry = mantis_graph::Registry::standard();
+        for node in d.graph.nodes.values() {
+            registry
+                .validate_parameters(&node.type_name, &node.params)
+                .unwrap();
+        }
     }
     fn run(doc: &mut Document, selection: &BTreeSet<NodeId>, input: &str) -> BTreeSet<NodeId> {
         execute(doc, selection, input).unwrap().selection

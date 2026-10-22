@@ -58,6 +58,7 @@ mod util;
 mod vectors;
 
 use crate::component::{Component, PortSpec};
+use crate::parameters::{common_parameters, ParamKind, ParamSpec};
 use crate::value::{ParamValue, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -90,6 +91,80 @@ impl Component for FnComponent {
     }
     fn outputs(&self) -> Vec<PortSpec> {
         (self.outputs)()
+    }
+    fn parameters(&self) -> Vec<ParamSpec> {
+        let mut parameters = common_parameters();
+        let own = match self.type_name {
+            "number_slider" => vec![
+                ParamSpec::new(
+                    "min",
+                    ParamKind::Number,
+                    Some(ParamValue::Number(0.0)),
+                    "Slider lower bound",
+                ),
+                ParamSpec::new(
+                    "max",
+                    ParamKind::Number,
+                    Some(ParamValue::Number(10.0)),
+                    "Slider upper bound",
+                ),
+                ParamSpec::new(
+                    "step",
+                    ParamKind::Number,
+                    Some(ParamValue::Number(0.0)),
+                    "Snap interval; zero means continuous",
+                ),
+                ParamSpec::new(
+                    "value",
+                    ParamKind::Number,
+                    Some(ParamValue::Number(5.0)),
+                    "Current slider value",
+                ),
+            ],
+            "bool_toggle" => vec![ParamSpec::new(
+                "value",
+                ParamKind::Bool,
+                Some(ParamValue::Bool(false)),
+                "Current toggle value",
+            )],
+            "panel" => vec![
+                ParamSpec::new(
+                    "text",
+                    ParamKind::Text,
+                    Some(ParamValue::Text(String::new())),
+                    "Text displayed while the panel input is unwired",
+                ),
+                ParamSpec::new(
+                    "__cad_document",
+                    ParamKind::Text,
+                    None,
+                    "Preserved source CAD document metadata as JSON",
+                ),
+            ],
+            "imported_geometry" => vec![
+                ParamSpec::new(
+                    "data",
+                    ParamKind::Text,
+                    None,
+                    "Validated GeometryRecord encoded as JSON",
+                ),
+                ParamSpec::new(
+                    "__cad_document_node",
+                    ParamKind::Text,
+                    None,
+                    "Node id of the panel preserving shared source CAD document metadata",
+                ),
+            ],
+            "constant_list" => vec![ParamSpec::new(
+                "values",
+                ParamKind::Text,
+                Some(ParamValue::Text("[]".into())),
+                "JSON array of numbers, booleans and text imported from Grasshopper",
+            )],
+            _ => Vec::new(),
+        };
+        parameters.extend(own);
+        parameters
     }
     fn eval(
         &self,

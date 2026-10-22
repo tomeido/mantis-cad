@@ -19,10 +19,11 @@ ENV MANTIS_GIT_SHA=${MANTIS_GIT_SHA}
 
 COPY . .
 
+ARG CARGO_BUILD_JOBS=2
 RUN --mount=type=cache,id=mantis-web-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=mantis-web-target,target=/src/target,sharing=locked \
     cd crates/mantis-app \
-    && trunk build index.html \
+    && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" trunk build index.html \
       --release \
       --locked \
       --dist /out/dist \
@@ -37,11 +38,13 @@ WORKDIR /src
 
 COPY . .
 
+ARG CARGO_BUILD_JOBS=2
 RUN --mount=type=cache,id=mantis-native-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=mantis-native-target-${TARGETARCH},target=/src/target,sharing=locked \
-    cargo build --locked --release -p mantis-server -p mantis-admin \
+    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" cargo build --locked --release -p mantis-server -p mantis-admin -p mantis-cli \
     && install -Dm755 target/release/mantis-server /out/bin/mantis-server \
-    && install -Dm755 target/release/mantis-admin /out/bin/mantis-admin
+    && install -Dm755 target/release/mantis-admin /out/bin/mantis-admin \
+    && install -Dm755 target/release/mantis-cli /out/bin/mantis-cli
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 
@@ -64,6 +67,7 @@ RUN apt-get update \
 
 COPY --from=server-builder --chown=root:root /out/bin/mantis-server /usr/local/bin/mantis-server
 COPY --from=server-builder --chown=root:root /out/bin/mantis-admin /usr/local/bin/mantis-admin
+COPY --from=server-builder --chown=root:root /out/bin/mantis-cli /usr/local/bin/mantis-cli
 COPY --from=web-builder --chown=root:root /out/dist/ /app/dist/
 COPY --chown=root:root LICENSE /usr/share/licenses/mantis-cad/LICENSE
 COPY --chown=root:root crates/mantis-kernel/THIRD_PARTY_LICENSES.md /usr/share/licenses/mantis-cad/THIRD_PARTY_LICENSES.md

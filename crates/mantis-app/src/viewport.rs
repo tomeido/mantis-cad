@@ -198,6 +198,153 @@ pub struct SceneItem {
     pub geom: SceneGeom,
 }
 
+/// Pick visible preview geometry in logical screen points. Meshes use exact
+/// ray/triangle intersections; points and curves get a small screen-space target.
+pub fn pick_scene(
+    items: &[SceneItem],
+    camera: &Camera,
+    rect: egui::Rect,
+    pointer: egui::Pos2,
+) -> Option<NodeId> {
+    if !rect.contains(pointer) || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return None;
+    }
+    let eye = camera.eye();
+    let forward = (camera.target - eye).normalized();
+    let scale = (FOVY * 0.5).tan();
+    let x = (2.0 * (pointer.x - rect.left()) / rect.width() - 1.0) as f64;
+    let y = (1.0 - 2.0 * (pointer.y - rect.top()) / rect.height()) as f64;
+    let direction = (forward
+        + camera.right() * (x * rect.aspect_ratio() as f64 * scale)
+        + camera.up() * (y * scale))
+        .normalized();
+    let project = |point: Vec3| -> Option<egui::Pos2> {
+        let delta = point - eye;
+        let depth = delta.dot(forward);
+        if !point.is_finite() || depth < ZNEAR - 1e-9 || depth > ZFAR + 1e-9 {
+            return None;
+        }
+        Some(egui::pos2(
+            rect.center().x
+                + (delta.dot(camera.right()) / (depth * scale)) as f32 * rect.height() * 0.5,
+            rect.center().y
+                - (delta.dot(camera.up()) / (depth * scale)) as f32 * rect.height() * 0.5,
+        ))
+    };
+    let mut nearest: Option<(f64, NodeId)> = None;
+    let mut hit = |point: Vec3, node: NodeId| {
+        let depth = (point - eye).dot(forward);
+        let distance = (point - eye).dot(direction);
+        if (ZNEAR..=ZFAR).contains(&depth)
+            && distance.is_finite()
+            && nearest.is_none_or(|(best, _)| distance < best - 1e-8)
+        {
+            nearest = Some((distance, node));
+        }
+    };
+    for item in items {
+        match &item.geom {
+            SceneGeom::Mesh(mesh) => {
+                for [a, b, c] in &mesh.indices {
+                    let (Some(a), Some(b), Some(c)) = (
+                        mesh.positions.get(*a as usize),
+                        mesh.positions.get(*b as usize),
+                        mesh.positions.get(*c as usize),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(distance) = triangle_hit(eye, direction, *a, *b, *c) {
+                        hit(eye + direction * distance, item.node);
+                    }
+                }
+            }
+            SceneGeom::Point(point) => {
+                if project(*point).is_some_and(|screen| screen.distance(pointer) <= 7.0) {
+                    hit(*point, item.node);
+                }
+            }
+            SceneGeom::Curve(curve) => {
+                let mut points = match curve.as_ref() {
+                    Curve::Line { a, b } => vec![*a, *b],
+                    _ => curve.tessellate(CURVE_SEGS),
+                };
+                if curve.is_closed() {
+                    if let Some(first) = points.first().copied() {
+                        points.push(first);
+                    }
+                }
+                for pair in points.windows(2) {
+                    let Some(pair) = clip_segment_depth(pair[0], pair[1], eye, forward) else {
+                        continue;
+                    };
+                    let (Some(a), Some(b)) = (project(pair[0]), project(pair[1])) else {
+                        continue;
+                    };
+                    let edge = b - a;
+                    let t = if edge.length_sq() > 1e-12 {
+                        ((pointer - a).dot(edge) / edge.length_sq()).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    if (a + edge * t).distance(pointer) <= 6.0 {
+                        // Perspective-correct interpolation keeps a steep curve
+                        // behind a surface from winning the depth comparison.
+                        let da = (pair[0] - eye).dot(forward);
+                        let db = (pair[1] - eye).dot(forward);
+                        let weight = (t as f64 / db) / ((1.0 - t as f64) / da + t as f64 / db);
+                        hit(pair[0] + (pair[1] - pair[0]) * weight, item.node);
+                    }
+                }
+            }
+        }
+    }
+    nearest.map(|(_, node)| node)
+}
+
+fn clip_segment_depth(a: Vec3, b: Vec3, eye: Vec3, forward: Vec3) -> Option<[Vec3; 2]> {
+    if !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    let da = (a - eye).dot(forward);
+    let db = (b - eye).dot(forward);
+    let delta = db - da;
+    if delta.abs() < 1e-12 {
+        return (ZNEAR..=ZFAR).contains(&da).then_some([a, b]);
+    }
+    let near = (ZNEAR - da) / delta;
+    let far = (ZFAR - da) / delta;
+    let start = near.min(far).max(0.0);
+    let end = near.max(far).min(1.0);
+    (start <= end).then_some([a + (b - a) * start, a + (b - a) * end])
+}
+
+fn triangle_hit(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f64> {
+    let edge_a = b - a;
+    let edge_b = c - a;
+    let p = direction.cross(edge_b);
+    let determinant = edge_a.dot(p);
+    if !determinant.is_finite() || determinant.abs() < 1e-12 {
+        return None;
+    }
+    let delta = origin - a;
+    let u = delta.dot(p) / determinant;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = delta.cross(edge_a);
+    let v = direction.dot(q) / determinant;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let distance = edge_b.dot(q) / determinant;
+    (distance.is_finite() && distance > 0.0).then_some(distance)
+}
+
+pub struct ViewportSelection {
+    pub node: Option<NodeId>,
+    pub additive: bool,
+}
+
 /// Collect all drawable geometry from the eval outputs of preview-enabled
 /// nodes, recursing into `List` values (bounded depth against pathology).
 pub fn collect_scene(graph: &Graph, eval: &EvalOutput) -> Vec<SceneItem> {
@@ -779,6 +926,7 @@ pub struct ViewportPanel {
     pub stats: SceneStats,
     surface_display: SurfaceDisplay,
     stripe_density: f32,
+    scene: Vec<SceneItem>,
 }
 
 impl ViewportPanel {
@@ -789,6 +937,7 @@ impl ViewportPanel {
             stats: SceneStats::default(),
             surface_display: SurfaceDisplay::default(),
             stripe_density: 14.0,
+            scene: Vec::new(),
         }
     }
 
@@ -798,13 +947,14 @@ impl ViewportPanel {
         let items = collect_scene(doc.display_graph(), &doc.last_eval);
         let (batches, stats) = build_batches(&items, selection);
         self.stats = stats;
+        self.scene = items;
         if let Ok(mut s) = self.shared.lock() {
             s.pending = Some(batches);
         }
     }
 
     /// Draw the viewport into the given ui (fills the available rect).
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<ViewportSelection> {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.surface_display, SurfaceDisplay::Shaded, "Shaded");
             ui.selectable_value(&mut self.surface_display, SurfaceDisplay::Zebra, "Zebra")
@@ -819,6 +969,17 @@ impl ViewportPanel {
 
         // --- interaction -------------------------------------------------
         let shift = ui.input(|i| i.modifiers.shift);
+        let selection =
+            if response.clicked_by(egui::PointerButton::Primary) && !response.double_clicked() {
+                response
+                    .interact_pointer_pos()
+                    .map(|pointer| ViewportSelection {
+                        node: pick_scene(&self.scene, &self.camera, rect, pointer),
+                        additive: shift,
+                    })
+            } else {
+                None
+            };
         if response.dragged_by(egui::PointerButton::Middle)
             || (response.dragged_by(egui::PointerButton::Primary) && shift)
         {
@@ -876,6 +1037,11 @@ impl ViewportPanel {
 
         // --- overlay text ---------------------------------------------------
         let painter = ui.painter_at(rect);
+        if self.scene.is_empty() {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER,
+                "Start a model with Ctrl / Cmd + K\nTry: Box 10 20 30 or Circle 5\nOpen a .mantis file from File, or drop it here",
+                egui::FontId::proportional(14.0), egui::Color32::from_rgb(170, 180, 193));
+        }
         let overlay = format!(
             "{} tris · {} verts",
             self.stats.triangles, self.stats.vertices
@@ -890,10 +1056,11 @@ impl ViewportPanel {
         painter.text(
             rect.left_bottom() + egui::vec2(8.0, -6.0),
             egui::Align2::LEFT_BOTTOM,
-            "drag orbit · shift/middle-drag pan · scroll zoom · double-click / F fit",
+            "click select · shift-click add/remove · drag orbit · shift/middle-drag pan · scroll zoom · F fit",
             egui::FontId::proportional(11.0),
             egui::Color32::from_rgb(110, 118, 130),
         );
+        selection
     }
 
     pub fn geometry_bytes(&self) -> usize {
@@ -1012,6 +1179,112 @@ mod tests {
 
     fn nid(n: u128) -> NodeId {
         NodeId(n)
+    }
+
+    fn picking_camera() -> (Camera, egui::Rect) {
+        (
+            Camera {
+                target: Vec3::ZERO,
+                distance: 10.0,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+        )
+    }
+
+    #[test]
+    fn picking_chooses_frontmost_surface_and_ignores_invalid_triangles() {
+        let (camera, rect) = picking_camera();
+        let mesh = |x| {
+            Arc::new(Mesh {
+                positions: vec![
+                    Vec3::new(x, -2.0, -2.0),
+                    Vec3::new(x, 2.0, -2.0),
+                    Vec3::new(x, 0.0, 2.0),
+                ],
+                normals: vec![],
+                indices: vec![[0, 1, 2], [0, 1, 999]],
+            })
+        };
+        let items = vec![
+            SceneItem {
+                node: nid(1),
+                geom: SceneGeom::Mesh(mesh(0.0)),
+            },
+            SceneItem {
+                node: nid(2),
+                geom: SceneGeom::Mesh(mesh(2.0)),
+            },
+            SceneItem {
+                node: nid(3),
+                geom: SceneGeom::Point(Vec3::new(-1.0, 0.0, 0.0)),
+            },
+        ];
+        assert_eq!(
+            pick_scene(&items, &camera, rect, rect.center()),
+            Some(nid(2))
+        );
+        assert_eq!(pick_scene(&items, &camera, rect, rect.left_top()), None);
+        // A surface behind the eye must never be selected.
+        let behind = [SceneItem {
+            node: nid(4),
+            geom: SceneGeom::Mesh(mesh(11.0)),
+        }];
+        assert_eq!(pick_scene(&behind, &camera, rect, rect.center()), None);
+    }
+
+    #[test]
+    fn curve_and_point_picking_use_screen_tolerance_at_different_zoom_levels() {
+        let (mut camera, rect) = picking_camera();
+        let items = [SceneItem {
+            node: nid(1),
+            geom: SceneGeom::Curve(Arc::new(Curve::Line {
+                a: Vec3::new(0.0, -1.0, 0.0),
+                b: Vec3::new(0.0, 1.0, 0.0),
+            })),
+        }];
+        for distance in [5.0, 100.0] {
+            camera.distance = distance;
+            assert_eq!(
+                pick_scene(&items, &camera, rect, rect.center() + egui::vec2(0.0, 5.0)),
+                Some(nid(1))
+            );
+            assert_eq!(
+                pick_scene(&items, &camera, rect, rect.center() + egui::vec2(0.0, 12.0)),
+                None
+            );
+            let points = [SceneItem {
+                node: nid(2),
+                geom: SceneGeom::Point(Vec3::ZERO),
+            }];
+            assert_eq!(
+                pick_scene(&points, &camera, rect, rect.center() + egui::vec2(6.0, 0.0)),
+                Some(nid(2))
+            );
+            assert_eq!(
+                pick_scene(&points, &camera, rect, rect.center() + egui::vec2(8.0, 0.0)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn picking_curves_clips_segments_crossing_the_camera_planes() {
+        let (camera, rect) = picking_camera();
+        for (a, b) in [
+            (Vec3::new(11.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            (Vec3::new(0.0, -1.0, 0.0), Vec3::new(-600.0, 1.0, 0.0)),
+        ] {
+            let items = [SceneItem {
+                node: nid(1),
+                geom: SceneGeom::Curve(Arc::new(Curve::Line { a, b })),
+            }];
+            assert_eq!(
+                pick_scene(&items, &camera, rect, rect.center()),
+                Some(nid(1))
+            );
+        }
     }
 
     #[test]
