@@ -97,6 +97,7 @@ impl WorkspaceFiles {
             .set_title("Open Mantis workspace")
             .add_filter("Mantis workspace", &["mantis"])
             .add_filter("Mantis chain JSON", &["json"])
+            .add_filter("All files", &["*"])
             .pick_file()
         {
             let result = std::fs::File::open(&path)
@@ -171,11 +172,6 @@ pub fn save(payload: &str, name: &str) -> Result<Option<String>, String> {
         .save_file()
     else {
         return Ok(None);
-    };
-    let path = if path.extension().is_none() {
-        path.with_extension("mantis")
-    } else {
-        path
     };
     crate::workspace::atomic_write(&path, payload.as_bytes())
         .map_err(|error| format!("Cannot save {}: {error}", path.display()))?;
