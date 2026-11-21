@@ -209,6 +209,74 @@ tag that exactly matches the workspace package version then:
 2. packages unsigned preview applications for Linux, macOS Intel, macOS Apple
    Silicon, and Windows, with `SHA256SUMS` in the GitHub Release.
 
+The container's `.github/scripts/browser_smoke.py` check uses a fresh Chrome
+profile to run `Circle 5` through the WASM command palette, wait for its pending
+operations to reach IndexedDB, reload, and run `Move 1 2 3` on the restored
+selection before adding `Sphere 7`. It checks that the saved Move input is
+connected to the original circle's node ID, exercising the restored graph and
+selection through an edit that depends on them. Both subsequent saves must
+retain the exact earlier pending operations and the same chain head, without
+committing.
+After the Move is saved, it sends Ctrl+Z and waits for IndexedDB pending
+operations to match the pre-Move snapshot exactly, then sends Ctrl+Shift+Z
+and waits for the complete saved Move operations to return. Each history
+step must preserve the workspace, chain head, block count, and recovery
+operations. This checks autosave after Undo/Redo of a post-reload edit;
+the Undo/Redo stacks themselves are not persisted across reloads.
+Before each reload it sets an in-memory page marker and requires that marker
+to disappear after startup, proving that the test continues in a new document.
+An acknowledged refresh request alone cannot satisfy this check.
+It then aborts an IndexedDB catalog write after the request succeeds, checks
+that the last durable workspace is unchanged and subsequent edits do not
+trigger more writes, and reloads to verify editing resumes from that saved
+workspace. A second scenario throws a synthetic `QuotaExceededError` before
+the first catalog `put()` reaches IndexedDB and verifies that the app aborts
+the transaction, stops subsequent saves, and resumes saving after reload.
+A third scenario substitutes `add()` for the first catalog `put()` against
+the already saved key, causing a real asynchronous `ConstraintError`. It
+observes the request error, its propagation to the transaction, and the
+automatic abort without cancelling the error or calling `abort()` itself.
+It then checks the same durable workspace preservation, disabled subsequent
+saves, and recovery after reload.
+A fourth scenario closes the app's IndexedDB connection immediately before
+starting a catalog write transaction, causing a real `InvalidStateError`.
+It requires exactly one failed transaction start and no `put()` call, checks
+that a subsequent edit does not retry starting a transaction, and verifies
+that reload preserves the durable workspace and permits a new edit to save.
+It uses distinct edit values so an earlier successful save cannot satisfy
+the recovery check. These scenarios exercise asynchronous and synchronous
+save-failure paths in the real WASM app; the fault hook observes write attempts
+without reading their payloads.
+Each command must return focus to the canvas for at least 0.25 seconds before
+the check continues, including the edit after saving has been disabled.
+Assertions use selected workspace fields; device settings and signing material
+are never returned or logged. The automated check does not assert the canvas
+warning text, exhaust actual browser storage quota, or cover reloading before
+the autosave completes.
+For a locally served web build, start a matching ChromeDriver with
+`chromedriver --port=9515`, then run
+`python3 .github/scripts/browser_smoke.py http://127.0.0.1:7878/`.
+
+CI also runs `.github/scripts/browser_smoke_negative.py` with the same URL,
+`--webdriver`, and `--timeout` arguments. In fresh browser sessions it removes
+Enter or substitutes an invalid command for the edit after saving is disabled.
+Each command case must fail at the command-completion assertion; startup and
+transport errors cannot pass these checks. Another control replaces the
+request-error injection with an explicit transaction abort and requires the
+request-error assertion to reject it, so a different failure mechanism cannot
+pass that scenario. The transaction-start control substitutes the quota-write
+failure and requires the transaction-start assertion to reject it, confirming
+that a later `put()` failure cannot stand in for a transaction-start failure.
+A restored-geometry control creates and selects a new `Circle 59` before the
+post-reload Move. It requires the source-node assertion to reject this valid,
+saved Move on the wrong circle; command or autosave failures cannot pass it.
+Two history controls omit either Undo or Redo and require the corresponding
+autosave wait to time out, so an unchanged saved pending list cannot pass.
+A missing-reload control acknowledges the first refresh without
+performing it and requires the document-replacement assertion to reject the
+still-running page. Run it locally with
+`python3 .github/scripts/browser_smoke_negative.py http://127.0.0.1:7878/`.
+
 Production deployment remains an explicit operator action. Record the published
 image digest, rebuild the path-prefixed self-host image when needed, replace the
 single container without deleting `/data`, and verify `/readyz` plus the public

@@ -249,16 +249,39 @@ cargo run --locked -p mantis-cli -- diff examples/demo-chain.json --from 1 --to 
 
 ### 정의·형상 변경 이력 비교
 
-`diff FILE [--from N] [--to N] [--json]`의 `N`은 genesis를 0으로 하는 블록 인덱스입니다.
+`diff FILE [--from N] [--to N] [--geometry-scope preview|all] [--json]`의 `N`은
+genesis를 0으로 하는 블록 인덱스입니다.
 `--to`를 생략하면 head, `--from`까지 생략하면 head 직전(가능하지 않으면
 genesis)과 비교합니다. 일반 출력은 `(from, to]` 구간의 커밋·연산 수, 노드·연결의
-순변화, preview 점·곡선·메시 개수와 면적·부호 체적, 객체 변경 수를 요약합니다.
+순변화, 선택 범위의 점·곡선·메시 개수와 면적·부호 체적, 객체 변경 수를 요약합니다.
 `--json`은 동일한 보고서와 구간의 원본 `GraphOp`를 schema version 1 JSON으로 출력합니다.
+
+보고서의 `engine_version`과 `evaluator_provenance`는 비교에 사용한 현재 평가기를
+설명합니다. `registry_contract_hash`는 컴포넌트 이름과 순서 있는 입출력 포트의
+이름·종류·접근 방식·기본값을 SHA-256으로 요약하며, `build_id`는 빌드 시
+`MANTIS_GIT_SHA` 값입니다(미지정·빈 값은 `unknown`). 사람용 출력에도 둘 다 표시합니다.
+계약 해시는 평가 함수·커널 구현이나 노드 파라미터 의미까지 식별하지 않으며,
+과거 커밋의 실행 환경 복원을 보장하지 않습니다. 이 필드가 없는 이전 보고서의
+provenance는 미상으로 유지합니다. 자세한 범위는 [MVP_SCOPE](docs/MVP_SCOPE.md)를 참고하세요.
+
+형상 비교의 기본 범위는 `preview`로, 미리보기가 켜진 노드의 점·곡선·메시를 비교합니다.
+`--geometry-scope all`은 `__preview=false`인 숨긴 노드의 형상과 중간 출력까지 포함합니다.
+두 범위 모두 스칼라·텍스트·평면은 형상 객체로 세지 않으며, 같은 형상이 여러 노드에서
+출력되면 각각 집계하므로 `all`의 면적·체적 합계는 최종 솔리드의 합집합 측정값이 아닙니다.
+사람용 출력의 `geometry scope`와 JSON의 `geometry.scope`에 선택한 범위를 표시합니다.
+이 필드가 없는 기존 version 1 보고서는 `preview`로 해석합니다. 숨긴 노드의 형상 평가
+실패도 `all`에서는 완전성 진단에 포함됩니다. 서명된 체인과 동기화 형식은 바꾸지 않습니다.
+
+`diff` 입력 파일은 공백을 포함해 최대 **32 MiB (33,554,432바이트)**까지 허용합니다.
+한도보다 1바이트까지만 더 읽어 크기 초과를 확인하고, 초과하면 JSON 파싱·체인 검증·평가 전에
+한도를 명시한 오류와 종료 코드 1을 반환하며 보고서를 출력하지 않습니다.
+이 제한은 CLI `diff`에만 적용됩니다. `mantis-history` 직접 호출, 노드 수,
+형상 평가 비용과 출력 보고서 크기에 대한 별도 예산은 아직 없습니다.
 
 분류는 `no_effect`, `layout_only`, `definition_only`, `geometry_changed`, `incomplete`입니다.
 `incomplete`는 fingerprint 변화는 없지만 평가 오류·너무 깊은 리스트·비유한 형상
 때문에 “형상이 변하지 않았다”를 보장할 수 없음을 뜻합니다. 형상은 체인에 남은
-스냅샷이 아니라 **현재 바이너리의 평가기**로 다시 계산한 preview 출력입니다.
+스냅샷이 아니라 **현재 바이너리의 평가기**로 다시 계산한 선택 범위의 출력입니다.
 메시 fingerprint는 테셀레이션의 정확 비교이지
 공차를 고려한 B-rep 동치성 판정이 아니며, `.gh`, `.ghx`, `.3dm` 파일을 직접 읽지 않습니다.
 상세한 가정·위험·비범위는 [MVP 범위](docs/MVP_SCOPE.md)에 정리했습니다.

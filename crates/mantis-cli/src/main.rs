@@ -46,6 +46,7 @@ USAGE:
   mantis-cli push FILE --server URL --project SLUG
                                                publish signed blocks with head checks
   mantis-cli diff FILE [--from N] [--to N] [--json]
+                    [--geometry-scope preview|all]
                                                compare committed definition + geometry
   mantis-cli audit FILE                         verified provenance + head checkpoint JSON
   mantis-cli inspect FILE                      list blocks (idx, author, ops, bytes)

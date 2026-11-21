@@ -223,6 +223,10 @@ jobs:
             http://127.0.0.1:7878/ \
             --webdriver http://127.0.0.1:9515 \
             --timeout 30
+          python3 .github/scripts/browser_smoke_negative.py \
+            http://127.0.0.1:7878/ \
+            --webdriver http://127.0.0.1:9515 \
+            --timeout 30
 
       - name: Clean up smoke test
         if: always()

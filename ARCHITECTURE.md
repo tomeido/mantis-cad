@@ -2,9 +2,11 @@
 
 A featherweight Rhino-like parametric CAD tool in Rust. Grasshopper-style node
 graph is the *only* source of truth; collaboration happens by recording **graph
-operations (GraphOps) on a hash-linked, signed chain** — never geometry. Any
-peer replays the op-log deterministically to reconstruct the identical model,
-so a multi-megabyte model syncs as a few kilobytes of ops.
+operations (GraphOps) on a hash-linked, signed chain**. Peers replay the op-log
+deterministically to reconstruct the graph and derive ordinary parametric
+geometry locally. Imported CAD originals and previews, and external B-rep
+results, are stored in node parameters and increase the chain's size with that
+data. Replay uses the stored data without re-running the external CAD engine.
 
 ```
 crates/
@@ -29,15 +31,19 @@ std::net, no filesystem in library code paths).
 ## Iron rules (determinism)
 
 1. **The chain records only `GraphOp`s** — component insertions, connections,
-   parameter changes. Never meshes, never vertices.
+   parameter changes. Ordinary component outputs are derived rather than
+   recorded. Imported CAD originals/previews and external B-rep results are
+   the exception: `imported_geometry` data and shared CAD document metadata
+   are recorded through node-parameter `GraphOp`s and are signed on commit.
 2. Replay must be bit-identical in *graph structure* on every platform:
    - No `HashMap`/`HashSet` in any path that affects evaluation order,
      serialization, or hashing. Use `BTreeMap`/`Vec`.
    - No randomness and no clock reads inside kernel/graph/chain evaluation.
      `NodeId`s are generated at the UI edge and *recorded inside the op*.
    - Topological evaluation order ties broken by ascending `NodeId`.
-3. Block hashes cover ops + metadata only, so cross-platform floating-point
-   drift can never fork the chain (geometry is derived, not authoritative).
+3. Block hashes cover ops + metadata, including recorded CAD data. Locally
+   evaluated outputs are excluded, so cross-platform floating-point drift
+   during evaluation cannot fork the chain.
 4. `serde_json` serialization of ops must round-trip losslessly. All public
    graph/chain types derive `Serialize + Deserialize + Clone + Debug + PartialEq`.
 
@@ -63,7 +69,9 @@ deterministic tests in the owning crate and at least one boundary consumer.
 - `HistoryDiff` (history): validates the complete chain, treats revisions as
   block indices, preserves commits in `(from, to]`, and reports the net graph
   snapshot delta. It re-evaluates both graphs with `Registry::standard()` and
-  compares preview-enabled point/curve/mesh outputs. This geometry and its
+  compares preview-enabled point/curve/mesh outputs by default. The explicit
+  `all` geometry scope also includes hidden nodes; reports record `geometry.scope`
+  (missing scope in older reports means `preview`). This geometry and its
   fingerprints are derived evidence, not signed chain state. JSON reports carry
   `schema_version`; callers must handle `incomplete` rather than interpreting it
   as unchanged geometry.
