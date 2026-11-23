@@ -4,7 +4,7 @@ ARG TRUNK_VERSION=0.21.14
 ARG MANTIS_WEB_BASE_PATH=""
 ARG MANTIS_WEB_PUBLIC_URL=/
 
-FROM --platform=$BUILDPLATFORM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS web-builder
+FROM --platform=$BUILDPLATFORM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS web-builder
 
 ARG TRUNK_VERSION
 WORKDIR /src
@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=mantis-web-registry,target=/usr/local/cargo/registry,s
       --dist /out/dist \
       --public-url "${MANTIS_WEB_PUBLIC_URL}"
 
-FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS server-builder
+FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS server-builder
 
 ARG MANTIS_GIT_SHA=unknown
 ARG TARGETARCH
@@ -46,7 +46,7 @@ RUN --mount=type=cache,id=mantis-native-registry-${TARGETARCH},target=/usr/local
     && install -Dm755 target/release/mantis-admin /out/bin/mantis-admin \
     && install -Dm755 target/release/mantis-cli /out/bin/mantis-cli
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
 ARG MANTIS_GIT_SHA=unknown
 
